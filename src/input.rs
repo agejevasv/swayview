@@ -153,7 +153,12 @@ fn step(scenes: &[&Scene], sel: Sel, dir: Dir) -> Option<Sel> {
 /// (`pointer_output`), the command moves the cursor there as well.
 pub fn command(action: &Action, tree: &Tree, pointer_output: Option<&str>) -> Option<String> {
     let (cmd, target) = match action {
-        Action::Focus(id) => (format!("[con_id={id}] focus"), tree.window_target(*id)),
+        Action::Focus(id) => {
+            // Sway will not focus a window behind a fullscreen one; end that first.
+            let unblock =
+                tree.fullscreen_blocker(*id).map(|fs| format!("[con_id={fs}] fullscreen disable; "));
+            (format!("{}[con_id={id}] focus", unblock.unwrap_or_default()), tree.window_target(*id))
+        }
         Action::Workspace(name) => {
             (format!("workspace {}", sway::quote(name)), tree.workspace_target(|w| &w.name == name))
         }
@@ -175,7 +180,7 @@ pub fn command(action: &Action, tree: &Tree, pointer_output: Option<&str>) -> Op
 mod tests {
     use super::*;
     use crate::layout::build;
-    use crate::model::tests::tree;
+    use crate::model::{Tree, tests::tree};
 
     /// The fixture's output, and a copy of it placed to its right.
     fn two_scenes() -> (Scene, Scene) {
@@ -186,8 +191,7 @@ mod tests {
         for w in right.workspaces.iter_mut().flat_map(|ws| &mut ws.windows) {
             w.rect.x += left.rect.w;
         }
-        let scene = |o: &crate::model::Output| build(&o.workspaces, o.rect, 1920.0, 1080.0);
-        (scene(&left), scene(&right))
+        (build(&left, 1920.0, 1080.0), build(&right, 1920.0, 1080.0))
     }
 
     fn index(s: &Scene, title: &str) -> usize {
@@ -280,6 +284,23 @@ mod tests {
             Some(r#"workspace "a \"b\"""#.into())
         );
         assert_eq!(command(&Action::Close, &t, None), None);
+    }
+
+    #[test]
+    fn focus_behind_fullscreen_ends_it_first() {
+        let t = Tree::from_json(include_bytes!("../tests/fixtures/sway-1.4-fullscreen-nested.json")).unwrap();
+        let id = |title: &str| {
+            t.workspaces().flat_map(|w| &w.windows).find(|w| w.title.starts_with(title)).unwrap().id
+        };
+        let (htop, github) = (id("htop"), id("GitHub"));
+        assert_eq!(
+            command(&Action::Focus(github), &t, Some("HEADLESS-1")),
+            Some(format!("[con_id={htop}] fullscreen disable; [con_id={github}] focus"))
+        );
+        assert_eq!(
+            command(&Action::Focus(htop), &t, Some("HEADLESS-1")),
+            Some(format!("[con_id={htop}] focus"))
+        );
     }
 
     #[test]

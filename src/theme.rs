@@ -23,6 +23,7 @@ pub struct Theme {
     pub focused: Class,
     pub focused_inactive: Class,
     pub unfocused: Class,
+    pub urgent: Class,
 }
 
 impl Default for Theme {
@@ -38,6 +39,7 @@ impl Default for Theme {
             focused: class(0x4c7899ff, 0x285577ff, 0xffffffff, 0x2e9ef4ff),
             focused_inactive: class(0x333333ff, 0x5f676aff, 0xffffffff, 0x484e50ff),
             unfocused: class(0x333333ff, 0x222222ff, 0x888888ff, 0x292d2eff),
+            urgent: class(0x2f343aff, 0x900000ff, 0xffffffff, 0x900000ff),
         }
     }
 }
@@ -110,6 +112,7 @@ impl Parser {
                     "client.focused" => &mut self.theme.focused,
                     "client.focused_inactive" => &mut self.theme.focused_inactive,
                     "client.unfocused" => &mut self.theme.unfocused,
+                    "client.urgent" => &mut self.theme.urgent,
                     _ => return,
                 };
                 let Some(colors) = args.split_whitespace().map(Rgba::parse).collect::<Option<Vec<_>>>()
@@ -253,6 +256,7 @@ mod tests {
             }
         );
         assert_eq!(t.focused_inactive, d.focused_inactive);
+        assert_eq!(t.urgent, d.urgent);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -269,9 +273,11 @@ mod tests {
     #[test]
     fn line_continuation() {
         let dir = temp_dir("continuation");
-        std::fs::write(dir.join("config"), "client.focused #010101 \\\n  #020202 #030303\n").unwrap();
+        let config = "client.focused #010101 \\\n  #020202 #030303\nclient.urgent #0a0a0a #0b0b0b #0c0c0c\n";
+        std::fs::write(dir.join("config"), config).unwrap();
         let t = Theme::load(Some(&dir.join("config")));
         assert_eq!(t.focused.background, Rgba(0x020202ff));
+        assert_eq!(t.urgent.background, Rgba(0x0b0b0bff));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

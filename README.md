@@ -49,14 +49,18 @@ Pressing the binding again closes the overview.
 | 1 … 9, 0            | switch to workspace number (0 = 10) |
 | Esc                 | close                               |
 
+A fullscreen window is drawn in its place in the layout, so the windows
+behind it stay reachable; picking one of them ends the fullscreen first, as
+sway will not focus a window hidden behind it.
+
 Each output shows its own workspaces, rendered at that output's scale
 (fractional scales need `wp_fractional_scale_v1`, sway 1.8 or later).
 
 
 ## Colors
 
-Window colors come from `client.focused`, `client.focused_inactive` and
-`client.unfocused` in the config sway loaded. `set $var` and `include` (with
+Window colors come from `client.focused`, `client.focused_inactive`,
+`client.unfocused` and `client.urgent` in the config sway loaded. `set $var` and `include` (with
 `~`, environment variables and `*` globs) are followed. If a color is unset,
 malformed or unreadable, sway's built-in default is used instead.
 
@@ -65,8 +69,15 @@ malformed or unreadable, sway's built-in default is used instead.
 | window            | `unfocused` border / background / text |
 | focused window    | `focused` border / background / text   |
 | hovered window    | `focused_inactive` background / text   |
-| keyboard selection| `focused` indicator (outline)          |
+| keyboard selection| the app's stripe color (outline)       |
 | focused workspace | `focused` border                       |
+| urgent window     | `urgent` border / background / text    |
+| urgent workspace  | `urgent` background (outline, number)  |
 
-The backdrop and workspace boxes use fixed neutral greys.
+The backdrop and workspace boxes use fixed neutral greys. Each window also
+gets a stripe on its left edge in a color picked from its app name, the same
+for every window of that app.
+
+Windows show their title, then the app name and any of `float`,
+`fullscreen` and `sticky`.
 

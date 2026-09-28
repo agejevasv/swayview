@@ -8,7 +8,7 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stro
 
 use crate::color::Rgba;
 use crate::fonts;
-use crate::layout::{HEADER, Hit, Scene};
+use crate::layout::{HEADER, Hit, Scene, WinItem};
 use crate::model::Rect;
 use crate::theme::Theme;
 
@@ -18,10 +18,29 @@ const WS_FILL: Rgba = Rgba(0x16181dff);
 const WS_BORDER: Rgba = Rgba(0x3a3f4bff);
 const WS_VISIBLE: Rgba = Rgba(0x6b7385ff);
 const LABEL: Rgba = Rgba(0xdde1e8ff);
-/// Alpha of the title line relative to the app line.
-const TITLE_FADE: u8 = 0xb0;
+const OUTPUT_NAME: Rgba = Rgba(0x8a93a5ff);
+/// Alpha of the app line relative to the title line.
+const APP_FADE: u8 = 0xb0;
+/// Accent colors apps are hashed into, about 30° apart in hue: red, orange,
+/// yellow, lime, green, teal, cyan, blue, indigo, purple, magenta, pink.
+const ACCENTS: [Rgba; 12] = [
+    Rgba(0xe06c75ff),
+    Rgba(0xe8915aff),
+    Rgba(0xe5c07bff),
+    Rgba(0xb5d468ff),
+    Rgba(0x98c379ff),
+    Rgba(0x5fc9a4ff),
+    Rgba(0x56b6c2ff),
+    Rgba(0x61afefff),
+    Rgba(0x8a8cf0ff),
+    Rgba(0xc678ddff),
+    Rgba(0xe87fd0ff),
+    Rgba(0xf78fb3ff),
+];
 
 const PAD: f32 = 6.0;
+/// Width of the app color stripe along a window's left edge.
+const STRIPE: f32 = 3.0;
 const LINE_HEIGHT: f32 = 1.3;
 /// Narrower windows get no text.
 const MIN_TEXT_WIDTH: f32 = 12.0;
@@ -47,9 +66,10 @@ impl TextStyle {
     }
 }
 
-const APP: TextStyle = TextStyle::new(14.0, true);
-const TITLE: TextStyle = TextStyle::new(12.0, false);
+const TITLE: TextStyle = TextStyle::new(14.0, true);
+const APP: TextStyle = TextStyle::new(12.0, false);
 const WS_LABEL: TextStyle = TextStyle::new(16.0, true);
+const OUTPUT_LABEL: TextStyle = TextStyle::new(13.0, false);
 
 #[derive(Debug)]
 pub struct View {
@@ -78,6 +98,13 @@ impl Renderer {
         pix.fill(BACKDROP.into());
         let t = Transform::from_scale(scale, scale);
         let theme = &self.theme;
+        self.text.draw(
+            &mut pix,
+            &scene.output_name,
+            scene.output_label,
+            OUTPUT_LABEL.color(OUTPUT_NAME),
+            scale,
+        );
 
         for (i, ws) in scene.workspaces.iter().enumerate() {
             let hovered = view.hover == Some(Hit::Workspace(i));
@@ -85,14 +112,17 @@ impl Renderer {
                 theme.focused.indicator
             } else if ws.focused {
                 theme.focused.border
+            } else if ws.urgent {
+                theme.urgent.background
             } else if ws.visible {
                 WS_VISIBLE
             } else {
                 WS_BORDER
             };
+            let width = if ws.focused || ws.urgent { 2.0 } else { 1.0 };
             fill(&mut pix, ws.rect, 6.0, WS_FILL, t);
-            stroke(&mut pix, ws.rect, 6.0, border, if ws.focused { 2.0 } else { 1.0 }, t);
-            let label = if hovered || ws.focused { border } else { LABEL };
+            stroke(&mut pix, ws.rect, 6.0, border, width, t);
+            let label = if hovered || ws.focused || ws.urgent { border } else { LABEL };
             let r = Rect::new(ws.header.x + 2.0, ws.header.y, ws.header.w - 4.0, HEADER);
             self.text.draw(&mut pix, &ws.name, r, WS_LABEL.color(label), scale);
         }
@@ -101,31 +131,40 @@ impl Renderer {
             let selected = view.selected == Some(i);
             let class = if win.focused {
                 theme.focused
+            } else if win.urgent {
+                theme.urgent
             } else if selected {
                 theme.focused_inactive
             } else {
                 theme.unfocused
             };
             let (border, width) = if selected {
-                (theme.focused.indicator, 3.0)
+                (accent(&win.app), 3.0)
             } else {
                 (class.border, if win.focused { 2.0 } else { 1.0 })
             };
             fill(&mut pix, win.rect, 4.0, class.background, t);
+            // Inside the border, so a thick selection outline does not hide it.
+            let stripe = Rect::new(win.rect.x + width, win.rect.y + width, STRIPE, win.rect.h - 2.0 * width);
+            fill(&mut pix, stripe, 1.5, accent(&win.app), t);
             stroke(&mut pix, win.rect, 4.0, border, width, t);
 
             let inner = win.rect.inset(PAD);
+            let inner = Rect::new(inner.x + STRIPE, inner.y, inner.w - STRIPE, inner.h);
             if inner.w < MIN_TEXT_WIDTH {
                 continue;
             }
-            let (app, title) = (APP.color(class.text), TITLE.color(class.text.fade(TITLE_FADE)));
-            if inner.h >= app.line_height() {
-                let r = Rect::new(inner.x, inner.y, inner.w, app.line_height());
-                self.text.draw(&mut pix, &win.app, r, app, scale);
+            let (first, second) = lines(win);
+            let (title, app) = (TITLE.color(class.text), APP.color(class.text.fade(APP_FADE)));
+            if inner.h >= title.line_height() {
+                let r = Rect::new(inner.x, inner.y, inner.w, title.line_height());
+                self.text.draw(&mut pix, first, r, title, scale);
             }
-            if inner.h >= app.line_height() + title.line_height() {
-                let r = Rect::new(inner.x, inner.y + app.line_height(), inner.w, title.line_height());
-                self.text.draw(&mut pix, &win.title, r, title, scale);
+            if let Some(second) = second
+                && inner.h >= title.line_height() + app.line_height()
+            {
+                let r = Rect::new(inner.x, inner.y + title.line_height(), inner.w, app.line_height());
+                self.text.draw(&mut pix, &second, r, app, scale);
             }
         }
         Some(pix)
@@ -158,6 +197,26 @@ impl Text {
             }
         });
     }
+}
+
+/// The two text lines of a window: the title, which tells windows of one app
+/// apart, then the app name and state tags. Without a title the app goes first.
+fn lines(win: &WinItem) -> (&str, Option<String>) {
+    let (first, rest) = if win.title.is_empty() {
+        (win.app.as_str(), win.tags.clone())
+    } else {
+        (win.title.as_str(), std::iter::once(win.app.as_str()).chain(win.tags.iter().copied()).collect())
+    };
+    (first, (!rest.is_empty()).then(|| rest.join(" · ")))
+}
+
+/// A stable color per app, ignoring case (`Slack` and `slack` match).
+fn accent(app: &str) -> Rgba {
+    // FNV-1a: stable across runs and builds, unlike `DefaultHasher`.
+    let hash = app
+        .bytes()
+        .fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b.to_ascii_lowercase())).wrapping_mul(0x0100_0193));
+    ACCENTS[hash as usize % ACCENTS.len()]
 }
 
 /// Source-over blend of a straight-alpha text color onto a premultiplied pixel.
@@ -219,6 +278,35 @@ fn stroke(pix: &mut Pixmap, r: Rect, radius: f32, color: Rgba, width: f32, t: Tr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{ConId, Rect};
+
+    fn win(title: &str, app: &str, tags: Vec<&'static str>) -> WinItem {
+        let (title, app) = (title.into(), app.into());
+        WinItem { id: ConId(1), app, title, rect: Rect::default(), focused: false, urgent: false, tags }
+    }
+
+    #[test]
+    fn text_lines() {
+        assert_eq!(lines(&win("htop", "foot", vec![])), ("htop", Some("foot".into())));
+        assert_eq!(
+            lines(&win("htop", "foot", vec!["float", "sticky"])),
+            ("htop", Some("foot · float · sticky".into()))
+        );
+        assert_eq!(lines(&win("", "foot", vec![])), ("foot", None));
+        assert_eq!(lines(&win("", "foot", vec!["float"])), ("foot", Some("float".into())));
+    }
+
+    #[test]
+    fn accents_are_stable_and_ignore_case() {
+        assert_eq!(accent("Alacritty"), accent("alacritty"));
+        assert_eq!(accent("firefox"), accent("firefox"));
+        // Apps that shared a color with the smaller palette.
+        assert_ne!(accent("Alacritty"), accent("brave-browser"));
+        // Not all apps share one color.
+        let apps = ["foot", "firefox", "code", "Slack", "discord", "Alacritty", "pavucontrol"];
+        let distinct: std::collections::HashSet<_> = apps.iter().map(|a| accent(a).0).collect();
+        assert!(distinct.len() > 2);
+    }
 
     #[test]
     fn zero_size_is_none_not_a_panic() {

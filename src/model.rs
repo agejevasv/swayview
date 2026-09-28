@@ -52,16 +52,18 @@ impl Rect {
         Rect::new(to.x + (r.x - self.x) * sx, to.y + (r.y - self.y) * sy, r.w * sx, r.h * sy)
     }
 
-    /// Splits into `n` equal slices along `axis`.
-    pub fn slices(&self, n: usize, axis: Axis) -> Vec<Rect> {
-        let n = n.max(1) as f32;
-        (0..n as usize)
-            .map(|i| {
-                let i = i as f32;
-                match axis {
-                    Axis::Horizontal => Rect::new(self.x + self.w * i / n, self.y, self.w / n, self.h),
-                    Axis::Vertical => Rect::new(self.x, self.y + self.h * i / n, self.w, self.h / n),
-                }
+    /// Splits along `axis` into consecutive parts, one per fraction of the whole.
+    pub fn split(&self, fractions: &[f32], axis: Axis) -> Vec<Rect> {
+        let mut offset = 0.0;
+        fractions
+            .iter()
+            .map(|f| {
+                let r = match axis {
+                    Axis::Horizontal => Rect::new(self.x + self.w * offset, self.y, self.w * f, self.h),
+                    Axis::Vertical => Rect::new(self.x, self.y + self.h * offset, self.w, self.h * f),
+                };
+                offset += f;
+                r
             })
             .collect()
     }
@@ -100,11 +102,12 @@ pub struct Workspace {
     pub focused: bool,
     /// Currently shown on its output.
     pub visible: bool,
-    /// In drawing order: tiled, then floating, then fullscreen.
+    /// In drawing order: tiled, then floating.
     pub windows: Vec<Window>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools, reason = "independent flags, as sway reports them")]
 pub struct Window {
     pub id: ConId,
     pub app: String,
@@ -112,6 +115,9 @@ pub struct Window {
     pub rect: Rect,
     pub floating: bool,
     pub fullscreen: bool,
+    pub sticky: bool,
+    /// Asks for attention.
+    pub urgent: bool,
     pub focused: bool,
 }
 
@@ -198,6 +204,17 @@ impl Tree {
         Some(WarpTarget { output: &o.name, point: o.rect.center() })
     }
 
+    /// The fullscreen window that stops sway from focusing window `id`, if any.
+    /// Sway refuses to focus windows hidden behind a fullscreen one.
+    pub fn fullscreen_blocker(&self, id: ConId) -> Option<ConId> {
+        let ws = self.workspaces().find(|ws| ws.windows.iter().any(|w| w.id == id))?;
+        let target = ws.windows.iter().find(|w| w.id == id)?;
+        if target.fullscreen {
+            return None;
+        }
+        ws.windows.iter().find(|w| w.fullscreen).map(|w| w.id)
+    }
+
     /// The output holding the focused workspace.
     pub fn focused_output(&self) -> Option<&Output> {
         self.outputs.iter().find(|o| o.workspaces.iter().any(|w| w.focused))
@@ -205,16 +222,22 @@ impl Tree {
 }
 
 fn workspace(node: &Node, output_rect: Rect, current: Option<&str>) -> Workspace {
-    let mut c = Collector { output_rect, floating: false, windows: Vec::new() };
-    for child in &node.nodes {
-        c.node(child, child.outer_rect());
-    }
+    let mut c = Collector { floating: false, in_fullscreen: false, windows: Vec::new() };
+    c.children(node, node.rect.into());
     c.floating = true;
     for child in &node.floating_nodes {
-        c.node(child, child.outer_rect());
+        // A fullscreen floating window's own geometry is not reported; it is
+        // shown in the middle of the output instead of covering everything.
+        let target = if child.fullscreen_mode == 0 {
+            child.outer_rect()
+        } else {
+            let o = output_rect;
+            Rect::new(o.x + o.w / 4.0, o.y + o.h / 4.0, o.w / 2.0, o.h / 2.0)
+        };
+        c.node(child, target);
     }
     let mut windows = c.windows;
-    windows.sort_by_key(|w| (w.fullscreen, w.floating));
+    windows.sort_by_key(|w| w.floating);
     Workspace {
         name: node.name_str().to_string(),
         num: node.num.filter(|n| *n >= 0),
@@ -231,23 +254,25 @@ enum Arrange {
     /// As equal slices: tabbed and stacked children all share one rect in
     /// sway, and missing rects fall back to this too.
     Slices(Axis),
+    /// By their share of the container. A fullscreen child reports the whole
+    /// output as its rect; this puts it back in its place in the layout.
+    Shares(Axis),
 }
 
 /// Collects the leaf windows of one workspace.
 struct Collector {
-    output_rect: Rect,
     floating: bool,
+    /// Inside a fullscreen container.
+    in_fullscreen: bool,
     windows: Vec<Window>,
 }
 
 impl Collector {
     /// Collects `node`'s windows, drawing it into `target`.
     fn node(&mut self, node: &Node, target: Rect) {
-        // Global fullscreen (mode 2) spans all outputs; it is drawn like
-        // workspace fullscreen, filling its own output.
-        let fullscreen = node.fullscreen_mode != 0;
-        let target = if fullscreen { self.output_rect } else { target };
-
+        // Workspace (1) or global (2), of the window or a container holding it;
+        // either way drawn in its tiled place.
+        let fullscreen = self.in_fullscreen || node.fullscreen_mode != 0;
         if node.nodes.is_empty() {
             self.windows.push(Window {
                 id: node.id,
@@ -256,33 +281,59 @@ impl Collector {
                 rect: target,
                 floating: self.floating,
                 fullscreen,
+                sticky: node.sticky,
+                urgent: node.urgent,
                 focused: node.focused,
             });
             return;
         }
+        let outer = std::mem::replace(&mut self.in_fullscreen, fullscreen);
+        self.children(node, target);
+        self.in_fullscreen = outer;
+    }
 
+    /// Collects the windows of `node`'s tiled children, drawing it into `target`.
+    fn children(&mut self, node: &Node, target: Rect) {
         let own: Rect = node.rect.into();
+        let axis = if node.layout == Layout::Splitv { Axis::Vertical } else { Axis::Horizontal };
         let missing = own.is_empty() || node.nodes.iter().any(|c| c.outer_rect().is_empty());
         let arrange = match node.layout {
             Layout::Tabbed => Arrange::Slices(Axis::Horizontal),
             Layout::Stacked => Arrange::Slices(Axis::Vertical),
-            Layout::Splitv if missing => Arrange::Slices(Axis::Vertical),
-            _ if missing => Arrange::Slices(Axis::Horizontal),
+            _ if node.nodes.iter().any(|c| c.fullscreen_mode != 0) => Arrange::Shares(axis),
+            _ if missing => Arrange::Slices(axis),
             _ => Arrange::Mapped,
         };
-        match arrange {
-            Arrange::Slices(axis) => {
-                for (child, slice) in node.nodes.iter().zip(target.slices(node.nodes.len(), axis)) {
-                    self.node(child, slice);
-                }
-            }
-            Arrange::Mapped => {
-                for child in &node.nodes {
-                    self.node(child, own.map_into(child.outer_rect(), target));
-                }
-            }
+        let n = node.nodes.len();
+        let slots = match arrange {
+            Arrange::Slices(axis) => target.split(&vec![1.0 / n.max(1) as f32; n], axis),
+            Arrange::Shares(axis) => target.split(&shares(&node.nodes), axis),
+            Arrange::Mapped => node.nodes.iter().map(|c| own.map_into(c.outer_rect(), target)).collect(),
+        };
+        for (child, slot) in node.nodes.iter().zip(slots) {
+            self.node(child, slot);
         }
     }
+}
+
+/// Fractions of their container for `children` along its split axis. A
+/// fullscreen child's own share is meaningless, so it gets what its siblings
+/// leave. Falls back to equal shares when the numbers do not add up.
+fn shares(children: &[Node]) -> Vec<f32> {
+    let equal = vec![1.0 / children.len().max(1) as f32; children.len()];
+    let known = |c: &Node| c.percent.filter(|p| c.fullscreen_mode == 0 && *p > 0.0 && *p <= 1.0);
+    let taken: f32 = children.iter().filter_map(known).sum();
+    let unknown = children.iter().filter(|c| known(c).is_none()).count();
+    let rest = (1.0 - taken) / unknown.max(1) as f32;
+    if unknown > 0 && rest <= 0.0 {
+        return equal;
+    }
+    let fractions: Vec<f32> = children.iter().map(|c| known(c).unwrap_or(rest)).collect();
+    let total: f32 = fractions.iter().sum();
+    if total <= 0.0 {
+        return equal;
+    }
+    fractions.iter().map(|f| f / total).collect()
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +372,10 @@ struct Node {
     #[serde(default)]
     focused: bool,
     #[serde(default)]
+    urgent: bool,
+    #[serde(default)]
+    sticky: bool,
+    #[serde(default)]
     nodes: Vec<Node>,
     #[serde(default)]
     floating_nodes: Vec<Node>,
@@ -332,6 +387,8 @@ struct Node {
     /// 0 none, 1 workspace, 2 global.
     #[serde(default)]
     fullscreen_mode: u8,
+    /// Share of the parent container along its split axis.
+    percent: Option<f32>,
     current_workspace: Option<String>,
 }
 
@@ -473,6 +530,73 @@ pub(crate) mod tests {
         assert_eq!(unfocused.focus(), Some(focus));
     }
 
+    fn workspace_1(json: &[u8]) -> Vec<(String, Rect, bool)> {
+        let t = Tree::from_json(json).unwrap();
+        ws(&t, "1").windows.iter().map(|w| (w.title.clone(), w.rect, w.fullscreen)).collect()
+    }
+
+    #[test]
+    fn fullscreen_window_keeps_its_tiled_place() {
+        // htop is fullscreen inside the right-hand split; GitHub is below it.
+        let w = workspace_1(include_bytes!("../tests/fixtures/sway-1.4-fullscreen-nested.json"));
+        let rect = |title: &str| w.iter().find(|x| x.0.starts_with(title)).unwrap();
+        assert_eq!(rect("htop").1, Rect::new(960.0, 0.0, 960.0, 540.0));
+        assert!(rect("htop").2);
+        assert_eq!(rect("GitHub").1, Rect::new(960.0, 540.0, 960.0, 540.0));
+        assert_eq!(rect("~/src").1, Rect::new(0.0, 0.0, 960.0, 1080.0));
+
+        // The left window is fullscreen directly on the workspace.
+        let w = workspace_1(include_bytes!("../tests/fixtures/sway-1.4-fullscreen-top.json"));
+        let rect = |title: &str| w.iter().find(|x| x.0.starts_with(title)).unwrap();
+        assert_eq!(rect("~/src").1, Rect::new(0.0, 0.0, 960.0, 1080.0));
+        assert!(rect("~/src").2);
+        assert_eq!(rect("htop").1, Rect::new(960.0, 0.0, 960.0, 540.0));
+        assert_eq!(rect("GitHub").1, Rect::new(960.0, 540.0, 960.0, 540.0));
+    }
+
+    #[test]
+    fn fullscreen_blocks_focus_of_its_siblings() {
+        let t = Tree::from_json(include_bytes!("../tests/fixtures/sway-1.4-fullscreen-nested.json")).unwrap();
+        let id = |title: &str| {
+            t.workspaces().flat_map(|w| &w.windows).find(|w| w.title.starts_with(title)).unwrap().id
+        };
+        assert_eq!(t.fullscreen_blocker(id("GitHub")), Some(id("htop")));
+        assert_eq!(t.fullscreen_blocker(id("htop")), None);
+        // Other workspaces are not affected.
+        assert_eq!(t.fullscreen_blocker(id("Downloads")), None);
+        assert_eq!(tree().fullscreen_blocker(id("GitHub")), None);
+    }
+
+    #[test]
+    fn shares_fill_the_gap_left_for_fullscreen() {
+        let node = |fullscreen_mode, percent| Node {
+            id: ConId(0),
+            name: None,
+            ty: NodeType::Con,
+            rect: RawRect { x: 0, y: 0, width: 0, height: 0 },
+            deco_rect: None,
+            focused: false,
+            urgent: false,
+            sticky: false,
+            nodes: Vec::new(),
+            floating_nodes: Vec::new(),
+            layout: Layout::Other,
+            app_id: None,
+            window_properties: None,
+            num: None,
+            fullscreen_mode,
+            percent,
+            current_workspace: None,
+        };
+        assert_eq!(
+            shares(&[node(0, Some(0.25)), node(1, Some(2.0)), node(0, Some(0.25))]),
+            [0.25, 0.5, 0.25]
+        );
+        assert_eq!(shares(&[node(1, Some(1.0)), node(0, None)]), [0.5, 0.5]);
+        // Siblings claiming everything: equal shares instead of a zero-width window.
+        assert_eq!(shares(&[node(0, Some(0.5)), node(0, Some(0.5)), node(1, None)]), [1.0 / 3.0; 3]);
+    }
+
     #[test]
     fn unknown_node_types_and_layouts_parse() {
         let json = br#"{"id":1,"name":"root","type":"root","rect":{"x":0,"y":0,"width":10,"height":10},
@@ -480,10 +604,11 @@ pub(crate) mod tests {
               "rect":{"x":0,"y":0,"width":10,"height":10},
               "nodes":[{"id":3,"name":"1","num":1,"type":"workspace","rect":{"x":0,"y":0,"width":10,"height":10},
                 "nodes":[{"id":4,"name":"t","type":"future_type","app_id":"a","fullscreen_mode":2,
+                  "urgent":true,"sticky":true,
                   "rect":{"x":0,"y":0,"width":5,"height":5}}]}]}]}"#;
         let t = Tree::from_json(json).unwrap();
         let w = &t.outputs[0].workspaces[0].windows[0];
-        assert!(w.fullscreen);
+        assert!(w.fullscreen && w.urgent && w.sticky);
         assert_eq!(w.rect, Rect::new(0.0, 0.0, 10.0, 10.0));
     }
 }

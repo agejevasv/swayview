@@ -265,11 +265,8 @@ impl App {
         let selected_id = self.selected.map(|s| self.surfaces[s.surface].scene.windows[s.window].id);
         for s in &mut self.surfaces {
             let Some((w, h)) = s.size else { continue };
-            s.scene = self
-                .tree
-                .output(&s.output)
-                .map(|o| layout::build(&o.workspaces, o.rect, w as f32, h as f32))
-                .unwrap_or_default();
+            s.scene =
+                self.tree.output(&s.output).map(|o| layout::build(o, w as f32, h as f32)).unwrap_or_default();
             s.hover = s.pointer.and_then(|(x, y)| s.scene.hit(x, y));
         }
         let scenes = self.scenes();

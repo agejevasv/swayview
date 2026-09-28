@@ -81,7 +81,7 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
     }
     .context("no such output")?;
     let (w, h) = args.size.unwrap_or((output.rect.w as u32, output.rect.h as u32));
-    let scene = layout::build(&output.workspaces, output.rect, w as f32, h as f32);
+    let scene = layout::build(output, w as f32, h as f32);
     let view = View { selected: scene.focused_window(), hover: None };
     let pix = Renderer::new(theme).draw(&scene, &view, w, h, 1.0).context("image size is zero")?;
     pix.save_png(out).with_context(|| format!("writing {out}"))?;

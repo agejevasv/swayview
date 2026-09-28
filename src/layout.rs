@@ -1,8 +1,10 @@
 //! Places workspace boxes in a grid and windows inside them. Pure, no Wayland.
 
-use crate::model::{ConId, Rect, Workspace};
+use crate::model::{ConId, Output, Rect, Window};
 
 pub const HEADER: f32 = 28.0;
+/// Strip along the top of the surface holding the output's name.
+const OUTPUT_BAR: f32 = 36.0;
 const WINDOW_GAP: f32 = 3.0;
 /// A workspace box never gets larger than this fraction of the surface.
 const MAX_BOX: f32 = 0.5;
@@ -14,6 +16,8 @@ pub struct WsItem {
     pub rect: Rect,
     pub focused: bool,
     pub visible: bool,
+    /// Holds a window asking for attention.
+    pub urgent: bool,
 }
 
 #[derive(Debug)]
@@ -23,10 +27,17 @@ pub struct WinItem {
     pub title: String,
     pub rect: Rect,
     pub focused: bool,
+    pub urgent: bool,
+    /// States worth naming, e.g. `float`.
+    pub tags: Vec<&'static str>,
 }
 
 #[derive(Debug, Default)]
 pub struct Scene {
+    /// Name of the sway output this scene is shown on, e.g. `eDP-1`.
+    pub output_name: String,
+    /// Where the output name is drawn.
+    pub output_label: Rect,
     /// The sway output this scene is shown on, in global layout coordinates.
     pub output: Rect,
     /// Surface size the scene was laid out for.
@@ -64,15 +75,26 @@ impl Dir {
 }
 
 /// Lays out the `workspaces` of `output` on a `w`×`h` surface.
-pub fn build(workspaces: &[Workspace], output: Rect, w: f32, h: f32) -> Scene {
-    let mut scene = Scene { output, size: (w, h), ..Scene::default() };
+/// Lays out the workspaces of `output` on a `w`×`h` surface, below a strip
+/// with the output's name.
+pub fn build(output: &Output, w: f32, h: f32) -> Scene {
+    let pad = (w.min(h) * 0.03).clamp(12.0, 48.0);
+    let mut scene = Scene {
+        output_name: output.name.clone(),
+        output_label: Rect::new(pad, 0.0, (w - 2.0 * pad).max(0.0), OUTPUT_BAR),
+        output: output.rect,
+        size: (w, h),
+        ..Scene::default()
+    };
+    let (workspaces, rect) = (&output.workspaces, output.rect);
     let n = workspaces.len();
-    if n == 0 || output.is_empty() {
+    if n == 0 || rect.is_empty() {
         return scene;
     }
-    let pad = (w.min(h) * 0.03).clamp(12.0, 48.0);
+    // The grid goes below the name strip.
+    let (y0, h) = (OUTPUT_BAR, (h - OUTPUT_BAR).max(1.0));
     // Workspace boxes are miniatures of the output.
-    let aspect = output.w / output.h;
+    let aspect = rect.w / rect.h;
 
     // Pick the column count that gives the largest boxes.
     let (mut cols, mut box_w) = (1, 0.0);
@@ -90,7 +112,7 @@ pub fn build(workspaces: &[Workspace], output: Rect, w: f32, h: f32) -> Scene {
     let cell_h = HEADER + box_h;
     let rows = n.div_ceil(cols);
     let grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * pad;
-    let top = (h - grid_h) / 2.0;
+    let top = y0 + (h - grid_h) / 2.0;
 
     for (i, ws) in workspaces.iter().enumerate() {
         let (row, col) = (i / cols, i % cols);
@@ -101,13 +123,15 @@ pub fn build(workspaces: &[Workspace], output: Rect, w: f32, h: f32) -> Scene {
         let rect = Rect::new(x, y + HEADER, box_w, box_h);
 
         for win in &ws.windows {
-            let r = output.map_into(win.rect, rect).inset(WINDOW_GAP / 2.0);
+            let r = output.rect.map_into(win.rect, rect).inset(WINDOW_GAP / 2.0);
             scene.windows.push(WinItem {
                 id: win.id,
                 app: win.app.clone(),
                 title: win.title.clone(),
                 rect: clip(r, rect),
                 focused: win.focused,
+                urgent: win.urgent,
+                tags: tags(win),
             });
         }
         scene.workspaces.push(WsItem {
@@ -116,9 +140,17 @@ pub fn build(workspaces: &[Workspace], output: Rect, w: f32, h: f32) -> Scene {
             rect,
             focused: ws.focused,
             visible: ws.visible,
+            urgent: ws.windows.iter().any(|w| w.urgent),
         });
     }
     scene
+}
+
+fn tags(w: &Window) -> Vec<&'static str> {
+    [(w.floating, "float"), (w.fullscreen, "fullscreen"), (w.sticky, "sticky")]
+        .into_iter()
+        .filter_map(|(on, tag)| on.then_some(tag))
+        .collect()
 }
 
 fn clip(r: Rect, to: Rect) -> Rect {
@@ -176,12 +208,11 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::tests::tree;
+    use crate::model::{Tree, tests::tree};
 
     fn scene() -> Scene {
         let t = tree();
-        let o = &t.outputs[0];
-        build(&o.workspaces, o.rect, 1920.0, 1080.0)
+        build(&t.outputs[0], 1920.0, 1080.0)
     }
 
     #[test]
@@ -189,7 +220,7 @@ mod tests {
         let s = scene();
         assert_eq!(s.workspaces.len(), 3);
         for (i, a) in s.workspaces.iter().enumerate() {
-            assert!(a.header.y >= 0.0 && a.rect.y + a.rect.h <= 1080.0);
+            assert!(a.header.y >= OUTPUT_BAR && a.rect.y + a.rect.h <= 1080.0);
             assert!(a.rect.x >= 0.0 && a.rect.x + a.rect.w <= 1920.0);
             for b in &s.workspaces[i + 1..] {
                 let apart = a.rect.x + a.rect.w <= b.rect.x
@@ -226,9 +257,36 @@ mod tests {
     }
 
     #[test]
+    fn every_window_is_reachable_with_one_fullscreen() {
+        let t = Tree::from_json(include_bytes!("../tests/fixtures/sway-1.4-fullscreen-nested.json")).unwrap();
+        let s = build(&t.outputs[0], 1920.0, 1080.0);
+        let ws1 = s.workspaces[0].rect;
+        for (i, w) in s.windows.iter().enumerate().filter(|(_, w)| ws1.contains(w.rect.x, w.rect.y)) {
+            let (x, y) = w.rect.center();
+            assert_eq!(s.hit(x, y), Some(Hit::Window(i)), "{} is covered", w.title);
+        }
+    }
+
+    #[test]
+    fn tags_and_urgency() {
+        let mut t = tree();
+        let o = &mut t.outputs[0];
+        let w = o.workspaces[1].windows.first_mut().unwrap();
+        (w.urgent, w.sticky) = (true, true);
+        let s = build(o, 1920.0, 1080.0);
+        assert_eq!(s.workspaces.iter().map(|w| w.urgent).collect::<Vec<_>>(), [false, true, false]);
+        let pavu = s.windows.iter().find(|w| w.app == "pavucontrol").unwrap();
+        assert_eq!(pavu.tags, ["float"]);
+        let urgent = s.windows.iter().find(|w| w.urgent).unwrap();
+        assert_eq!(urgent.tags, ["sticky"]);
+    }
+
+    #[test]
     fn empty_scene_keeps_output_and_size() {
-        let s = build(&[], Rect::new(10.0, 0.0, 5.0, 5.0), 100.0, 50.0);
+        let o = Output { name: "eDP-1".into(), rect: Rect::new(10.0, 0.0, 5.0, 5.0), workspaces: Vec::new() };
+        let s = build(&o, 100.0, 50.0);
         assert!(s.windows.is_empty() && s.workspaces.is_empty());
         assert_eq!((s.output.x, s.size), (10.0, (100.0, 50.0)));
+        assert_eq!(s.output_name, "eDP-1");
     }
 }
