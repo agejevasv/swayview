@@ -1,0 +1,846 @@
+{
+   "id": 1,
+   "name": "root",
+   "rect": {
+     "x": 0,
+     "y": 0,
+     "width": 1920,
+     "height": 1080
+   },
+   "focused": false,
+   "focus": [
+     3
+   ],
+   "border": "none",
+   "current_border_width": 0,
+   "layout": "splith",
+   "orientation": "horizontal",
+   "percent": null,
+   "window_rect": {
+     "x": 0,
+     "y": 0,
+     "width": 0,
+     "height": 0
+   },
+   "deco_rect": {
+     "x": 0,
+     "y": 0,
+     "width": 0,
+     "height": 0
+   },
+   "geometry": {
+     "x": 0,
+     "y": 0,
+     "width": 0,
+     "height": 0
+   },
+   "window": null,
+   "urgent": false,
+   "floating_nodes": [
+   ],
+   "sticky": false,
+   "type": "root",
+   "nodes": [
+     {
+       "id": 2147483647,
+       "name": "__i3",
+       "rect": {
+         "x": 0,
+         "y": 0,
+         "width": 1920,
+         "height": 1080
+       },
+       "focused": false,
+       "focus": [
+         2147483646
+       ],
+       "border": "none",
+       "current_border_width": 0,
+       "layout": "output",
+       "orientation": "horizontal",
+       "percent": null,
+       "window_rect": {
+         "x": 0,
+         "y": 0,
+         "width": 0,
+         "height": 0
+       },
+       "deco_rect": {
+         "x": 0,
+         "y": 0,
+         "width": 0,
+         "height": 0
+       },
+       "geometry": {
+         "x": 0,
+         "y": 0,
+         "width": 0,
+         "height": 0
+       },
+       "window": null,
+       "urgent": false,
+       "floating_nodes": [
+       ],
+       "sticky": false,
+       "type": "output",
+       "nodes": [
+         {
+           "id": 2147483646,
+           "name": "__i3_scratch",
+           "rect": {
+             "x": 0,
+             "y": 0,
+             "width": 1920,
+             "height": 1080
+           },
+           "focused": false,
+           "focus": [
+           ],
+           "border": "none",
+           "current_border_width": 0,
+           "layout": "splith",
+           "orientation": "horizontal",
+           "percent": null,
+           "window_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "deco_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "geometry": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "window": null,
+           "urgent": false,
+           "floating_nodes": [
+           ],
+           "sticky": false,
+           "type": "workspace"
+         }
+       ]
+     },
+     {
+       "id": 3,
+       "name": "HEADLESS-1",
+       "rect": {
+         "x": 0,
+         "y": 0,
+         "width": 1920,
+         "height": 1080
+       },
+       "focused": false,
+       "focus": [
+         4,
+         14,
+         9
+       ],
+       "border": "none",
+       "current_border_width": 0,
+       "layout": "output",
+       "orientation": "none",
+       "percent": 1.0,
+       "window_rect": {
+         "x": 0,
+         "y": 0,
+         "width": 0,
+         "height": 0
+       },
+       "deco_rect": {
+         "x": 0,
+         "y": 0,
+         "width": 0,
+         "height": 0
+       },
+       "geometry": {
+         "x": 0,
+         "y": 0,
+         "width": 0,
+         "height": 0
+       },
+       "window": null,
+       "urgent": false,
+       "floating_nodes": [
+       ],
+       "sticky": false,
+       "type": "output",
+       "active": true,
+       "dpms": true,
+       "primary": false,
+       "make": "headless",
+       "model": "headless",
+       "serial": "",
+       "scale": 1.0,
+       "scale_filter": "nearest",
+       "transform": "normal",
+       "current_workspace": "1",
+       "modes": [
+       ],
+       "current_mode": {
+         "width": 1920,
+         "height": 1080,
+         "refresh": 60000
+       },
+       "max_render_time": 0,
+       "nodes": [
+         {
+           "id": 4,
+           "name": "1",
+           "rect": {
+             "x": 0,
+             "y": 0,
+             "width": 1920,
+             "height": 1080
+           },
+           "focused": false,
+           "focus": [
+             7,
+             5
+           ],
+           "border": "none",
+           "current_border_width": 0,
+           "layout": "splith",
+           "orientation": "horizontal",
+           "percent": null,
+           "window_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "deco_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "geometry": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "window": null,
+           "urgent": false,
+           "floating_nodes": [
+           ],
+           "sticky": false,
+           "num": 1,
+           "output": "HEADLESS-1",
+           "type": "workspace",
+           "representation": "H[foot V[firefox foot]]",
+           "nodes": [
+             {
+               "id": 5,
+               "name": "~\/src\/sway-overview — nvim src\/layout.rs",
+               "rect": {
+                 "x": 0,
+                 "y": 25,
+                 "width": 960,
+                 "height": 1055
+               },
+               "focused": false,
+               "focus": [
+               ],
+               "border": "normal",
+               "current_border_width": 2,
+               "layout": "none",
+               "orientation": "none",
+               "percent": 0.5,
+               "window_rect": {
+                 "x": 2,
+                 "y": 0,
+                 "width": 956,
+                 "height": 1053
+               },
+               "deco_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 960,
+                 "height": 25
+               },
+               "geometry": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 400,
+                 "height": 300
+               },
+               "window": null,
+               "urgent": false,
+               "floating_nodes": [
+               ],
+               "sticky": false,
+               "type": "con",
+               "fullscreen_mode": 0,
+               "pid": 4834,
+               "app_id": "foot",
+               "visible": true,
+               "marks": [
+               ],
+               "max_render_time": 0,
+               "nodes": [
+               ]
+             },
+             {
+               "id": 7,
+               "name": null,
+               "rect": {
+                 "x": 960,
+                 "y": 0,
+                 "width": 960,
+                 "height": 1080
+               },
+               "focused": false,
+               "focus": [
+                 8,
+                 6
+               ],
+               "border": "none",
+               "current_border_width": 0,
+               "layout": "splitv",
+               "orientation": "vertical",
+               "percent": 0.5,
+               "window_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "deco_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "geometry": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "window": null,
+               "urgent": false,
+               "floating_nodes": [
+               ],
+               "sticky": false,
+               "type": "con",
+               "fullscreen_mode": 0,
+               "nodes": [
+                 {
+                   "id": 6,
+                   "name": "GitHub - swaywm\/sway: i3-compatible Wayland compositor - Mozilla Firefox",
+                   "rect": {
+                     "x": 960,
+                     "y": 25,
+                     "width": 960,
+                     "height": 515
+                   },
+                   "focused": false,
+                   "focus": [
+                   ],
+                   "border": "normal",
+                   "current_border_width": 2,
+                   "layout": "none",
+                   "orientation": "none",
+                   "percent": 0.5,
+                   "window_rect": {
+                     "x": 2,
+                     "y": 0,
+                     "width": 956,
+                     "height": 513
+                   },
+                   "deco_rect": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 960,
+                     "height": 25
+                   },
+                   "geometry": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 400,
+                     "height": 300
+                   },
+                   "window": null,
+                   "urgent": false,
+                   "floating_nodes": [
+                   ],
+                   "sticky": false,
+                   "type": "con",
+                   "fullscreen_mode": 0,
+                   "pid": 4836,
+                   "app_id": "firefox",
+                   "visible": true,
+                   "marks": [
+                   ],
+                   "max_render_time": 0,
+                   "nodes": [
+                   ]
+                 },
+                 {
+                   "id": 8,
+                   "name": "htop",
+                   "rect": {
+                     "x": 960,
+                     "y": 565,
+                     "width": 960,
+                     "height": 515
+                   },
+                   "focused": true,
+                   "focus": [
+                   ],
+                   "border": "normal",
+                   "current_border_width": 2,
+                   "layout": "none",
+                   "orientation": "none",
+                   "percent": 0.5,
+                   "window_rect": {
+                     "x": 2,
+                     "y": 0,
+                     "width": 956,
+                     "height": 513
+                   },
+                   "deco_rect": {
+                     "x": 0,
+                     "y": 540,
+                     "width": 960,
+                     "height": 25
+                   },
+                   "geometry": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 400,
+                     "height": 300
+                   },
+                   "window": null,
+                   "urgent": false,
+                   "floating_nodes": [
+                   ],
+                   "sticky": false,
+                   "type": "con",
+                   "fullscreen_mode": 0,
+                   "pid": 4839,
+                   "app_id": "foot",
+                   "visible": true,
+                   "marks": [
+                   ],
+                   "max_render_time": 0,
+                   "nodes": [
+                   ]
+                 }
+               ]
+             }
+           ]
+         },
+         {
+           "id": 9,
+           "name": "2",
+           "rect": {
+             "x": 0,
+             "y": 0,
+             "width": 1920,
+             "height": 1080
+           },
+           "focused": false,
+           "focus": [
+             11
+           ],
+           "border": "none",
+           "current_border_width": 0,
+           "layout": "splith",
+           "orientation": "horizontal",
+           "percent": null,
+           "window_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "deco_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "geometry": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "window": null,
+           "urgent": false,
+           "floating_nodes": [
+           ],
+           "sticky": false,
+           "num": 2,
+           "output": "HEADLESS-1",
+           "type": "workspace",
+           "representation": "H[T[code Slack discord]]",
+           "nodes": [
+             {
+               "id": 11,
+               "name": null,
+               "rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 1920,
+                 "height": 1080
+               },
+               "focused": false,
+               "focus": [
+                 13,
+                 12,
+                 10
+               ],
+               "border": "none",
+               "current_border_width": 0,
+               "layout": "tabbed",
+               "orientation": "none",
+               "percent": 1.0,
+               "window_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "deco_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "geometry": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "window": null,
+               "urgent": false,
+               "floating_nodes": [
+               ],
+               "sticky": false,
+               "type": "con",
+               "fullscreen_mode": 0,
+               "nodes": [
+                 {
+                   "id": 10,
+                   "name": "main.rs - sway-overview - Visual Studio Code",
+                   "rect": {
+                     "x": 0,
+                     "y": 25,
+                     "width": 1920,
+                     "height": 1055
+                   },
+                   "focused": false,
+                   "focus": [
+                   ],
+                   "border": "normal",
+                   "current_border_width": 2,
+                   "layout": "none",
+                   "orientation": "none",
+                   "percent": 1.0,
+                   "window_rect": {
+                     "x": 2,
+                     "y": 0,
+                     "width": 1916,
+                     "height": 1053
+                   },
+                   "deco_rect": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 640,
+                     "height": 25
+                   },
+                   "geometry": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 400,
+                     "height": 300
+                   },
+                   "window": null,
+                   "urgent": false,
+                   "floating_nodes": [
+                   ],
+                   "sticky": false,
+                   "type": "con",
+                   "fullscreen_mode": 0,
+                   "pid": 4842,
+                   "app_id": "code",
+                   "visible": false,
+                   "marks": [
+                   ],
+                   "max_render_time": 0,
+                   "nodes": [
+                   ]
+                 },
+                 {
+                   "id": 12,
+                   "name": "Slack | #general | Acme",
+                   "rect": {
+                     "x": 0,
+                     "y": 25,
+                     "width": 1920,
+                     "height": 1055
+                   },
+                   "focused": false,
+                   "focus": [
+                   ],
+                   "border": "normal",
+                   "current_border_width": 2,
+                   "layout": "none",
+                   "orientation": "none",
+                   "percent": 1.0,
+                   "window_rect": {
+                     "x": 2,
+                     "y": 0,
+                     "width": 1916,
+                     "height": 1053
+                   },
+                   "deco_rect": {
+                     "x": 640,
+                     "y": 0,
+                     "width": 640,
+                     "height": 25
+                   },
+                   "geometry": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 400,
+                     "height": 300
+                   },
+                   "window": null,
+                   "urgent": false,
+                   "floating_nodes": [
+                   ],
+                   "sticky": false,
+                   "type": "con",
+                   "fullscreen_mode": 0,
+                   "pid": 4845,
+                   "app_id": "Slack",
+                   "visible": false,
+                   "marks": [
+                   ],
+                   "max_render_time": 0,
+                   "nodes": [
+                   ]
+                 },
+                 {
+                   "id": 13,
+                   "name": "Discord | #rust",
+                   "rect": {
+                     "x": 0,
+                     "y": 25,
+                     "width": 1920,
+                     "height": 1055
+                   },
+                   "focused": false,
+                   "focus": [
+                   ],
+                   "border": "normal",
+                   "current_border_width": 2,
+                   "layout": "none",
+                   "orientation": "none",
+                   "percent": 1.0,
+                   "window_rect": {
+                     "x": 2,
+                     "y": 0,
+                     "width": 1916,
+                     "height": 1053
+                   },
+                   "deco_rect": {
+                     "x": 1280,
+                     "y": 0,
+                     "width": 640,
+                     "height": 25
+                   },
+                   "geometry": {
+                     "x": 0,
+                     "y": 0,
+                     "width": 400,
+                     "height": 300
+                   },
+                   "window": null,
+                   "urgent": false,
+                   "floating_nodes": [
+                   ],
+                   "sticky": false,
+                   "type": "con",
+                   "fullscreen_mode": 0,
+                   "pid": 4848,
+                   "app_id": "discord",
+                   "visible": false,
+                   "marks": [
+                   ],
+                   "max_render_time": 0,
+                   "nodes": [
+                   ]
+                 }
+               ]
+             }
+           ]
+         },
+         {
+           "id": 14,
+           "name": "3",
+           "rect": {
+             "x": 0,
+             "y": 0,
+             "width": 1920,
+             "height": 1080
+           },
+           "focused": false,
+           "focus": [
+             16,
+             15
+           ],
+           "border": "none",
+           "current_border_width": 0,
+           "layout": "splith",
+           "orientation": "horizontal",
+           "percent": null,
+           "window_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "deco_rect": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "geometry": {
+             "x": 0,
+             "y": 0,
+             "width": 0,
+             "height": 0
+           },
+           "window": null,
+           "urgent": false,
+           "floating_nodes": [
+             {
+               "id": 16,
+               "name": "Volume Control",
+               "rect": {
+                 "x": 760,
+                 "y": 390,
+                 "width": 400,
+                 "height": 300
+               },
+               "focused": false,
+               "focus": [
+               ],
+               "border": "csd",
+               "current_border_width": 2,
+               "layout": "none",
+               "orientation": "none",
+               "percent": 0.057870370370370378,
+               "window_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 400,
+                 "height": 300
+               },
+               "deco_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 0,
+                 "height": 0
+               },
+               "geometry": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 400,
+                 "height": 300
+               },
+               "window": null,
+               "urgent": false,
+               "floating_nodes": [
+               ],
+               "sticky": false,
+               "type": "floating_con",
+               "fullscreen_mode": 0,
+               "pid": 4853,
+               "app_id": "pavucontrol",
+               "visible": false,
+               "marks": [
+               ],
+               "max_render_time": 0,
+               "nodes": [
+               ]
+             }
+           ],
+           "sticky": false,
+           "num": 3,
+           "output": "HEADLESS-1",
+           "type": "workspace",
+           "representation": "H[org.gnome.Nautilus]",
+           "nodes": [
+             {
+               "id": 15,
+               "name": "Downloads",
+               "rect": {
+                 "x": 0,
+                 "y": 25,
+                 "width": 1920,
+                 "height": 1055
+               },
+               "focused": false,
+               "focus": [
+               ],
+               "border": "normal",
+               "current_border_width": 2,
+               "layout": "none",
+               "orientation": "none",
+               "percent": 1.0,
+               "window_rect": {
+                 "x": 2,
+                 "y": 0,
+                 "width": 1916,
+                 "height": 1053
+               },
+               "deco_rect": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 1920,
+                 "height": 25
+               },
+               "geometry": {
+                 "x": 0,
+                 "y": 0,
+                 "width": 400,
+                 "height": 300
+               },
+               "window": null,
+               "urgent": false,
+               "floating_nodes": [
+               ],
+               "sticky": false,
+               "type": "con",
+               "fullscreen_mode": 0,
+               "pid": 4851,
+               "app_id": "org.gnome.Nautilus",
+               "visible": false,
+               "marks": [
+               ],
+               "max_render_time": 0,
+               "nodes": [
+               ]
+             }
+           ]
+         }
+       ]
+     }
+   ]
+ }
