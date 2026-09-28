@@ -49,8 +49,7 @@ Pressing the binding again closes the overview.
 | Input               | Action                              |
 |---------------------|-------------------------------------|
 | click window        | focus it                            |
-| click workspace     | switch to it                        |
-| click background    | close                               |
+| click anywhere else | close                               |
 | arrows / hjkl       | move selection, on to other outputs |
 | Tab / Shift+Tab     | next / previous window, all outputs |
 | Enter               | focus selected window               |
@@ -65,27 +64,59 @@ Each output shows its own workspaces, rendered at that output's scale
 (fractional scales need `wp_fractional_scale_v1`, sway 1.8 or later).
 
 
-## Colors
-
-Window colors come from `client.focused`, `client.focused_inactive`,
-`client.unfocused` and `client.urgent` in the config sway loaded. `set $var` and `include` (with
-`~`, environment variables and `*` globs) are followed. If a color is unset,
-malformed or unreadable, sway's built-in default is used instead.
-
-| Element           | Color                                  |
-|-------------------|----------------------------------------|
-| window            | `unfocused` border / background / text |
-| focused window    | `focused` border / background / text   |
-| hovered window    | `focused_inactive` background / text   |
-| keyboard selection| the app's stripe color (outline)       |
-| focused workspace | `focused` border                       |
-| urgent window     | `urgent` border / background / text    |
-| urgent workspace  | `urgent` background (outline, number)  |
-
-The backdrop and workspace boxes use fixed neutral greys. Each window also
-gets a stripe on its left edge in a color picked from its app name, the same
-for every window of that app.
+## Theme
 
 Windows show their title, then the app name and any of `float`,
-`fullscreen` and `sticky`.
+`fullscreen` and `sticky`, with a stripe on the left edge in a color picked
+from the app name (the same for every window of that app). The selection
+starts on the focused window and moves with the keys and mouse; it and its
+workspace number use the active color.
 
+By default window colors come from `client.focused` (selected),
+`client.unfocused` and `client.urgent` in the config sway loaded, following
+`set $var` and `include`. Everything else has built-in defaults.
+
+Any color can be set in `~/.config/swayview/theme.yaml` (or
+`$XDG_CONFIG_HOME/swayview/theme.yaml`). Every key is optional; unset keys keep
+their default. Colors are `"#rrggbb"` or `"#rrggbbaa"` and must be quoted,
+since `#` starts a YAML comment. A file that cannot be read is reported and
+ignored.
+
+```yaml
+backdrop: "#101216e0"      # behind everything
+output_name: "#8a93a5"     # e.g. "eDP-1", top left
+workspace:
+  fill: "#16181d"
+  border: "#3a3f4b"
+  visible: "#6b7385"       # border of a workspace shown on its output
+  label: "#dde1e8"         # workspace number
+  selected: "#285577"      # number and border of the selection's workspace
+                           # (default: client.focused background)
+  urgent: "#900000"        # default: client.urgent background
+window:
+  normal:                  # default: client.unfocused
+    border: "#333333"
+    background: "#222222"
+    text: "#888888"
+  selected:                # default: client.focused
+    border: "#4c7899"
+    background: "#285577"
+    text: "#ffffff"
+  urgent:                  # default: client.urgent
+    border: "#2f343a"
+    background: "#900000"
+    text: "#ffffff"
+app_colors:                # stripe colors apps are hashed into
+  - "#e06c75"
+  - "#e8915a"
+  - "#e5c07b"
+  - "#b5d468"
+  - "#98c379"
+  - "#5fc9a4"
+  - "#56b6c2"
+  - "#61afef"
+  - "#8a8cf0"
+  - "#c678dd"
+  - "#e87fd0"
+  - "#f78fb3"
+```

@@ -1,9 +1,8 @@
 //! Keyboard and pointer input turned into actions, and actions into sway
 //! commands. Pure, no Wayland.
 
-use crate::layout::{Dir, Hit, Scene};
+use crate::layout::{Dir, Scene};
 use crate::model::{ConId, Tree};
-use crate::sway;
 
 /// A window on one of the overview's surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +29,6 @@ pub enum Action {
     Select(Sel),
     Close,
     Focus(ConId),
-    Workspace(String),
     WorkspaceNumber(i32),
 }
 
@@ -52,21 +50,14 @@ pub fn key(scenes: &[&Scene], sel: Option<Sel>, key: Key<'_>) -> Action {
     }
 }
 
-/// A left click at (`x`, `y`) on `scene`.
+/// A left click at (`x`, `y`) on `scene`: focuses the window there, or closes.
 pub fn click(scene: &Scene, x: f32, y: f32) -> Action {
-    match scene.hit(x, y) {
-        Some(Hit::Window(w)) => Action::Focus(scene.windows[w].id),
-        Some(Hit::Workspace(ws)) => Action::Workspace(scene.workspaces[ws].name.clone()),
-        None => Action::Close,
-    }
+    scene.hit(x, y).map_or(Action::Close, |w| Action::Focus(scene.windows[w].id))
 }
 
 /// Moving the pointer over a window selects it.
 pub fn motion(scene: &Scene, surface: usize, x: f32, y: f32) -> Action {
-    match scene.hit(x, y) {
-        Some(Hit::Window(window)) => Action::Select(Sel { surface, window }),
-        _ => Action::Nothing,
-    }
+    scene.hit(x, y).map_or(Action::Nothing, |window| Action::Select(Sel { surface, window }))
 }
 
 /// The selection sway's focus corresponds to, if it is shown.
@@ -158,9 +149,6 @@ pub fn command(action: &Action, tree: &Tree, pointer_output: Option<&str>) -> Op
             let unblock =
                 tree.fullscreen_blocker(*id).map(|fs| format!("[con_id={fs}] fullscreen disable; "));
             (format!("{}[con_id={id}] focus", unblock.unwrap_or_default()), tree.window_target(*id))
-        }
-        Action::Workspace(name) => {
-            (format!("workspace {}", sway::quote(name)), tree.workspace_target(|w| &w.name == name))
         }
         Action::WorkspaceNumber(n) => {
             (format!("workspace number {n}"), tree.workspace_target(|w| w.num == Some(*n)))
@@ -257,7 +245,7 @@ mod tests {
         assert_eq!(click(&a, x, y), Action::Focus(a.windows[w].id));
         assert_eq!(motion(&a, 0, x, y), Action::Select(Sel { surface: 0, window: w }));
         let header = a.workspaces[1].header;
-        assert_eq!(click(&a, header.x + 1.0, header.y + 1.0), Action::Workspace("2".into()));
+        assert_eq!(click(&a, header.x + 1.0, header.y + 1.0), Action::Close);
         assert_eq!(click(&a, 1.0, 1.0), Action::Close);
         assert_eq!(motion(&a, 0, 1.0, 1.0), Action::Nothing);
     }
@@ -279,10 +267,6 @@ mod tests {
         );
         // A workspace that does not exist yet is created where sway decides.
         assert_eq!(command(&Action::WorkspaceNumber(7), &t, None), Some("workspace number 7".into()));
-        assert_eq!(
-            command(&Action::Workspace("a \"b\"".into()), &t, None),
-            Some(r#"workspace "a \"b\"""#.into())
-        );
         assert_eq!(command(&Action::Close, &t, None), None);
     }
 

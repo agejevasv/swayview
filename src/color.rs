@@ -30,6 +30,15 @@ impl Rgba {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Rgba {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // `#` starts a comment in YAML, so an unquoted color arrives empty.
+        let s = Option::<String>::deserialize(d)?
+            .ok_or_else(|| serde::de::Error::custom("missing color; quote it, e.g. \"#rrggbb\""))?;
+        Rgba::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("{s:?} is not #rrggbb or #rrggbbaa")))
+    }
+}
+
 impl From<Rgba> for tiny_skia::Color {
     fn from(c: Rgba) -> Self {
         let [r, g, b, a] = c.to_bytes();

@@ -5,6 +5,7 @@ mod layout;
 mod model;
 mod render;
 mod sway;
+mod sway_config;
 mod theme;
 mod wayland;
 
@@ -74,7 +75,7 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
         None => sway::Ipc::connect()?.get_tree()?,
     };
     let config = sway::Ipc::connect().and_then(|mut ipc| ipc.config_path()).ok();
-    let theme = Theme::load(config.as_deref());
+    let theme = Theme::load(config.as_deref(), Theme::default_path().as_deref());
     let output = match &args.output {
         Some(name) => tree.outputs.iter().find(|o| &o.name == name),
         None => tree.focused_output().or(tree.outputs.first()),
@@ -82,7 +83,8 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
     .context("no such output")?;
     let (w, h) = args.size.unwrap_or((output.rect.w as u32, output.rect.h as u32));
     let scene = layout::build(output, w as f32, h as f32);
-    let view = View { selected: scene.focused_window(), hover: None };
+    let selected = scene.focused_window();
+    let view = View { selected, selected_workspace: scene.selected_workspace(selected) };
     let pix = Renderer::new(theme).draw(&scene, &view, w, h, 1.0).context("image size is zero")?;
     pix.save_png(out).with_context(|| format!("writing {out}"))?;
     Ok(())

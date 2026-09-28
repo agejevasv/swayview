@@ -8,35 +8,12 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stro
 
 use crate::color::Rgba;
 use crate::fonts;
-use crate::layout::{HEADER, Hit, Scene, WinItem};
+use crate::layout::{HEADER, Scene, WinItem};
 use crate::model::Rect;
 use crate::theme::Theme;
 
-// Around the windows; window colors come from the sway theme.
-const BACKDROP: Rgba = Rgba(0x101216e0);
-const WS_FILL: Rgba = Rgba(0x16181dff);
-const WS_BORDER: Rgba = Rgba(0x3a3f4bff);
-const WS_VISIBLE: Rgba = Rgba(0x6b7385ff);
-const LABEL: Rgba = Rgba(0xdde1e8ff);
-const OUTPUT_NAME: Rgba = Rgba(0x8a93a5ff);
 /// Alpha of the app line relative to the title line.
 const APP_FADE: u8 = 0xb0;
-/// Accent colors apps are hashed into, about 30° apart in hue: red, orange,
-/// yellow, lime, green, teal, cyan, blue, indigo, purple, magenta, pink.
-const ACCENTS: [Rgba; 12] = [
-    Rgba(0xe06c75ff),
-    Rgba(0xe8915aff),
-    Rgba(0xe5c07bff),
-    Rgba(0xb5d468ff),
-    Rgba(0x98c379ff),
-    Rgba(0x5fc9a4ff),
-    Rgba(0x56b6c2ff),
-    Rgba(0x61afefff),
-    Rgba(0x8a8cf0ff),
-    Rgba(0xc678ddff),
-    Rgba(0xe87fd0ff),
-    Rgba(0xf78fb3ff),
-];
 
 const PAD: f32 = 6.0;
 /// Width of the app color stripe along a window's left edge.
@@ -53,8 +30,9 @@ struct TextStyle {
 }
 
 impl TextStyle {
+    /// White until given a color with `color`.
     const fn new(size: f32, bold: bool) -> Self {
-        TextStyle { size, bold, color: LABEL }
+        TextStyle { size, bold, color: Rgba(0xffffffff) }
     }
 
     fn color(self, color: Rgba) -> Self {
@@ -73,8 +51,10 @@ const OUTPUT_LABEL: TextStyle = TextStyle::new(13.0, false);
 
 #[derive(Debug)]
 pub struct View {
+    /// The selected window, if it is on this scene.
     pub selected: Option<usize>,
-    pub hover: Option<Hit>,
+    /// The workspace marked as holding the selection.
+    pub selected_workspace: Option<usize>,
 }
 
 pub struct Renderer {
@@ -95,58 +75,45 @@ impl Renderer {
     /// Renders at `scale` physical pixels per logical pixel; `None` if `w` or `h` is 0.
     pub fn draw(&mut self, scene: &Scene, view: &View, w: u32, h: u32, scale: f32) -> Option<Pixmap> {
         let mut pix = Pixmap::new(w, h)?;
-        pix.fill(BACKDROP.into());
-        let t = Transform::from_scale(scale, scale);
         let theme = &self.theme;
-        self.text.draw(
-            &mut pix,
-            &scene.output_name,
-            scene.output_label,
-            OUTPUT_LABEL.color(OUTPUT_NAME),
-            scale,
-        );
+        pix.fill(theme.backdrop.into());
+        let t = Transform::from_scale(scale, scale);
+        let output_name = OUTPUT_LABEL.color(theme.output_name);
+        self.text.draw(&mut pix, &scene.output_name, scene.output_label, output_name, scale);
 
+        let c = &theme.workspace;
         for (i, ws) in scene.workspaces.iter().enumerate() {
-            let hovered = view.hover == Some(Hit::Workspace(i));
-            let border = if hovered {
-                theme.focused.indicator
-            } else if ws.focused {
-                theme.focused.border
+            let selected = view.selected_workspace == Some(i);
+            let (border, label, width) = if selected {
+                (c.selected, c.selected, 2.0)
             } else if ws.urgent {
-                theme.urgent.background
+                (c.urgent, c.urgent, 2.0)
             } else if ws.visible {
-                WS_VISIBLE
+                (c.visible, c.label, 1.0)
             } else {
-                WS_BORDER
+                (c.border, c.label, 1.0)
             };
-            let width = if ws.focused || ws.urgent { 2.0 } else { 1.0 };
-            fill(&mut pix, ws.rect, 6.0, WS_FILL, t);
+            fill(&mut pix, ws.rect, 6.0, c.fill, t);
             stroke(&mut pix, ws.rect, 6.0, border, width, t);
-            let label = if hovered || ws.focused || ws.urgent { border } else { LABEL };
             let r = Rect::new(ws.header.x + 2.0, ws.header.y, ws.header.w - 4.0, HEADER);
             self.text.draw(&mut pix, &ws.name, r, WS_LABEL.color(label), scale);
         }
 
         for (i, win) in scene.windows.iter().enumerate() {
             let selected = view.selected == Some(i);
-            let class = if win.focused {
-                theme.focused
+            // The selection starts on sway's focused window.
+            let class = if selected {
+                theme.window.selected
             } else if win.urgent {
-                theme.urgent
-            } else if selected {
-                theme.focused_inactive
+                theme.window.urgent
             } else {
-                theme.unfocused
+                theme.window.normal
             };
-            let (border, width) = if selected {
-                (accent(&win.app), 3.0)
-            } else {
-                (class.border, if win.focused { 2.0 } else { 1.0 })
-            };
+            let (border, width) = (class.border, if selected { 2.0 } else { 1.0 });
             fill(&mut pix, win.rect, 4.0, class.background, t);
             // Inside the border, so a thick selection outline does not hide it.
             let stripe = Rect::new(win.rect.x + width, win.rect.y + width, STRIPE, win.rect.h - 2.0 * width);
-            fill(&mut pix, stripe, 1.5, accent(&win.app), t);
+            fill(&mut pix, stripe, 1.5, theme.app_color(&win.app), t);
             stroke(&mut pix, win.rect, 4.0, border, width, t);
 
             let inner = win.rect.inset(PAD);
@@ -208,15 +175,6 @@ fn lines(win: &WinItem) -> (&str, Option<String>) {
         (win.title.as_str(), std::iter::once(win.app.as_str()).chain(win.tags.iter().copied()).collect())
     };
     (first, (!rest.is_empty()).then(|| rest.join(" · ")))
-}
-
-/// A stable color per app, ignoring case (`Slack` and `slack` match).
-fn accent(app: &str) -> Rgba {
-    // FNV-1a: stable across runs and builds, unlike `DefaultHasher`.
-    let hash = app
-        .bytes()
-        .fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b.to_ascii_lowercase())).wrapping_mul(0x0100_0193));
-    ACCENTS[hash as usize % ACCENTS.len()]
 }
 
 /// Source-over blend of a straight-alpha text color onto a premultiplied pixel.
@@ -282,7 +240,16 @@ mod tests {
 
     fn win(title: &str, app: &str, tags: Vec<&'static str>) -> WinItem {
         let (title, app) = (title.into(), app.into());
-        WinItem { id: ConId(1), app, title, rect: Rect::default(), focused: false, urgent: false, tags }
+        WinItem {
+            id: ConId(1),
+            app,
+            title,
+            rect: Rect::default(),
+            workspace: 0,
+            focused: false,
+            urgent: false,
+            tags,
+        }
     }
 
     #[test]
@@ -297,21 +264,9 @@ mod tests {
     }
 
     #[test]
-    fn accents_are_stable_and_ignore_case() {
-        assert_eq!(accent("Alacritty"), accent("alacritty"));
-        assert_eq!(accent("firefox"), accent("firefox"));
-        // Apps that shared a color with the smaller palette.
-        assert_ne!(accent("Alacritty"), accent("brave-browser"));
-        // Not all apps share one color.
-        let apps = ["foot", "firefox", "code", "Slack", "discord", "Alacritty", "pavucontrol"];
-        let distinct: std::collections::HashSet<_> = apps.iter().map(|a| accent(a).0).collect();
-        assert!(distinct.len() > 2);
-    }
-
-    #[test]
     fn zero_size_is_none_not_a_panic() {
-        let mut r = Renderer::new(Theme::default());
-        let view = View { selected: None, hover: None };
+        let mut r = Renderer::new(Theme::load(None, None));
+        let view = View { selected: None, selected_workspace: None };
         assert!(r.draw(&Scene::default(), &view, 0, 10, 1.0).is_none());
         assert!(r.draw(&Scene::default(), &view, 10, 10, 1.0).is_some());
     }

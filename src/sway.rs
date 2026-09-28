@@ -89,8 +89,3 @@ impl Ipc {
         }
     }
 }
-
-/// Quotes a string as a sway command argument.
-pub fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}

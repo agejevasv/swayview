@@ -26,6 +26,8 @@ pub struct WinItem {
     pub app: String,
     pub title: String,
     pub rect: Rect,
+    /// Index into `Scene::workspaces`.
+    pub workspace: usize,
     pub focused: bool,
     pub urgent: bool,
     /// States worth naming, e.g. `float`.
@@ -45,12 +47,6 @@ pub struct Scene {
     pub workspaces: Vec<WsItem>,
     /// Drawing order; the last one is on top.
     pub windows: Vec<WinItem>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Hit {
-    Window(usize),
-    Workspace(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +127,7 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
                 rect: clip(r, rect),
                 focused: win.focused,
                 urgent: win.urgent,
+                workspace: i,
                 tags: tags(win),
             });
         }
@@ -162,17 +159,18 @@ fn clip(r: Rect, to: Rect) -> Rect {
 }
 
 impl Scene {
-    pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
-        // The gap around a window belongs to it, so the pointer never falls
-        // through to the workspace between windows.
-        let grown = |r: Rect| r.inset(-WINDOW_GAP / 2.0);
-        if let Some(i) = self.windows.iter().rposition(|w| grown(w.rect).contains(x, y)) {
-            return Some(Hit::Window(i));
+    /// The topmost window at (`x`, `y`). The gap around a window counts as part of it.
+    pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.windows.iter().rposition(|w| w.rect.inset(-WINDOW_GAP / 2.0).contains(x, y))
+    }
+
+    /// The workspace to mark as selected: the one holding window `selected`,
+    /// or with nothing selected, sway's focused workspace.
+    pub fn selected_workspace(&self, selected: Option<usize>) -> Option<usize> {
+        match selected {
+            Some(w) => Some(self.windows[w].workspace),
+            None => self.workspaces.iter().position(|w| w.focused),
         }
-        self.workspaces
-            .iter()
-            .position(|ws| ws.rect.contains(x, y) || ws.header.contains(x, y))
-            .map(Hit::Workspace)
     }
 
     pub fn focused_window(&self) -> Option<usize> {
@@ -237,14 +235,15 @@ mod tests {
         let s = scene();
         let float = s.windows.iter().position(|w| w.app == "pavucontrol").unwrap();
         let (x, y) = s.windows[float].rect.center();
-        assert_eq!(s.hit(x, y), Some(Hit::Window(float)));
+        assert_eq!(s.hit(x, y), Some(float));
+        // Workspace numbers and borders are not clickable.
         let ws = &s.workspaces[0];
-        assert_eq!(s.hit(ws.header.x + 1.0, ws.header.y + 1.0), Some(Hit::Workspace(0)));
+        assert_eq!(s.hit(ws.header.x + 1.0, ws.header.y + 1.0), None);
         assert_eq!(s.hit(1.0, 1.0), None);
         // Between two adjacent windows is still a window, not the workspace.
         let (a, b) = (&s.windows[0].rect, &s.windows[1].rect);
         let gap_x = (a.x + a.w + b.x) / 2.0;
-        assert!(matches!(s.hit(gap_x, a.y + a.h / 2.0), Some(Hit::Window(_))));
+        assert!(s.hit(gap_x, a.y + a.h / 2.0).is_some());
     }
 
     #[test]
@@ -263,8 +262,17 @@ mod tests {
         let ws1 = s.workspaces[0].rect;
         for (i, w) in s.windows.iter().enumerate().filter(|(_, w)| ws1.contains(w.rect.x, w.rect.y)) {
             let (x, y) = w.rect.center();
-            assert_eq!(s.hit(x, y), Some(Hit::Window(i)), "{} is covered", w.title);
+            assert_eq!(s.hit(x, y), Some(i), "{} is covered", w.title);
         }
+    }
+
+    #[test]
+    fn selected_workspace_follows_the_selection() {
+        let s = scene();
+        let slack = s.windows.iter().position(|w| w.app == "Slack").unwrap();
+        assert_eq!(s.selected_workspace(Some(slack)), Some(1));
+        // Nothing selected: sway's focused workspace, "1" in the fixture.
+        assert_eq!(s.selected_workspace(None), Some(0));
     }
 
     #[test]

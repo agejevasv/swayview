@@ -48,7 +48,7 @@ use wayland_protocols::wp::{
 };
 
 use crate::input::{self, Action, Key, Sel};
-use crate::layout::{self, Dir, Hit, Scene};
+use crate::layout::{self, Dir, Scene};
 use crate::model::{Focus, Tree};
 use crate::render::{Renderer, View};
 use crate::sway::Ipc;
@@ -71,8 +71,6 @@ struct Surf {
     viewport: Option<WpViewport>,
     _fractional_scale: Option<WpFractionalScaleV1>,
     scene: Scene,
-    pointer: Option<(f32, f32)>,
-    hover: Option<Hit>,
     /// Needs a redraw.
     dirty: bool,
     /// A frame callback is outstanding; draw when it arrives.
@@ -182,7 +180,7 @@ impl App {
     fn new(globals: &GlobalList, qh: &QueueHandle<Self>) -> Result<Self> {
         let mut ipc = Ipc::connect()?;
         let tree = ipc.get_tree()?;
-        let theme = Theme::load(ipc.config_path().ok().as_deref());
+        let theme = Theme::load(ipc.config_path().ok().as_deref(), Theme::default_path().as_deref());
         let shm = Shm::bind(globals, qh).context("wl_shm")?;
         Ok(App {
             registry_state: RegistryState::new(globals),
@@ -248,8 +246,6 @@ impl App {
                 viewport,
                 _fractional_scale: fractional_scale,
                 scene: Scene::default(),
-                pointer: None,
-                hover: None,
                 dirty: false,
                 frame_pending: false,
             });
@@ -267,7 +263,6 @@ impl App {
             let Some((w, h)) = s.size else { continue };
             s.scene =
                 self.tree.output(&s.output).map(|o| layout::build(o, w as f32, h as f32)).unwrap_or_default();
-            s.hover = s.pointer.and_then(|(x, y)| s.scene.hit(x, y));
         }
         let scenes = self.scenes();
         self.selected =
@@ -310,10 +305,13 @@ impl App {
         let s = &mut self.surfaces[i];
         let Some((w, h)) = s.size else { return };
         let (scale, (pw, ph)) = buffer_size((w, h), s.scale);
-        let view = View {
-            selected: self.selected.filter(|sel| sel.surface == i).map(|sel| sel.window),
-            hover: s.hover,
+        let selected = self.selected.filter(|sel| sel.surface == i).map(|sel| sel.window);
+        // With a selection, only its workspace is marked; without, sway's focused one.
+        let selected_workspace = match self.selected {
+            Some(_) => selected.map(|w| s.scene.windows[w].workspace),
+            None => s.scene.selected_workspace(None),
         };
+        let view = View { selected, selected_workspace };
         let Some(pix) = self.renderer.draw(&s.scene, &view, pw, ph, scale) else { return };
 
         let (buffer, canvas) =
@@ -372,7 +370,7 @@ impl App {
             Action::Nothing => {}
             Action::Select(sel) => self.select(*sel),
             Action::Close => self.exit = true,
-            Action::Focus(_) | Action::Workspace(_) | Action::WorkspaceNumber(_) => {
+            Action::Focus(_) | Action::WorkspaceNumber(_) => {
                 if let Some(cmd) = input::command(action, &self.tree, self.pointer_output.as_deref())
                     && let Err(e) = self.ipc.command(&cmd)
                 {
@@ -597,30 +595,17 @@ impl PointerHandler for App {
             let Some(i) = self.surface_index(&event.surface) else { continue };
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
             match event.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
-                    let s = &mut self.surfaces[i];
-                    self.pointer_output = Some(s.output.clone());
-                    s.pointer = Some((x, y));
-                    let hover = s.scene.hit(x, y);
-                    if hover != s.hover {
-                        s.hover = hover;
-                        self.redraw(i);
-                    }
-                    // Moving over a window selects it. Enter alone does not, so a
-                    // resting mouse leaves the focused window selected on open.
-                    if matches!(event.kind, PointerEventKind::Motion { .. }) {
-                        let action = input::motion(&self.surfaces[i].scene, i, x, y);
-                        self.apply(&action);
-                    }
+                PointerEventKind::Enter { .. } => {
+                    self.pointer_output = Some(self.surfaces[i].output.clone());
                 }
-                PointerEventKind::Leave { .. } => {
-                    self.pointer_output = None;
-                    let s = &mut self.surfaces[i];
-                    s.pointer = None;
-                    if s.hover.take().is_some() {
-                        self.redraw(i);
-                    }
+                // Moving over a window selects it. Enter alone does not, so a
+                // resting mouse leaves the focused window selected on open.
+                PointerEventKind::Motion { .. } => {
+                    self.pointer_output = Some(self.surfaces[i].output.clone());
+                    let action = input::motion(&self.surfaces[i].scene, i, x, y);
+                    self.apply(&action);
                 }
+                PointerEventKind::Leave { .. } => self.pointer_output = None,
                 PointerEventKind::Press { button: BTN_LEFT, .. } => {
                     let action = input::click(&self.surfaces[i].scene, x, y);
                     self.apply(&action);

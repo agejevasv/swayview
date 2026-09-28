@@ -1,204 +1,214 @@
-//! Window colors from the sway config (`client.*`), falling back to sway's defaults.
+//! Every color swayview draws with.
 //!
-//! Sway does not expose these over IPC, so the config it loaded is read here,
-//! following `set $var` and `include`. Anything unreadable or malformed is
-//! skipped, leaving the defaults in place.
+//! Window colors default to sway's `client.*` colors, the rest to built-in
+//! values. Anything set in `$XDG_CONFIG_HOME/swayview/theme.yaml` (or
+//! `~/.config/swayview/theme.yaml`) replaces the default. A file that cannot
+//! be read or parsed is reported and ignored.
 
 use std::path::{Path, PathBuf};
 
-use crate::color::Rgba;
+use serde::Deserialize;
 
-/// Colors of one `client.<class>` line. The fifth color, `child_border`, is
-/// accepted but not drawn.
+use crate::color::Rgba;
+use crate::sway_config;
+use crate::warn;
+
+/// Colors of one kind of window box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Class {
     pub border: Rgba,
     pub background: Rgba,
     pub text: Rgba,
-    pub indicator: Rgba,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Theme {
-    pub focused: Class,
-    pub focused_inactive: Class,
-    pub unfocused: Class,
+pub struct WorkspaceColors {
+    pub fill: Rgba,
+    pub border: Rgba,
+    /// Border of a workspace currently shown on its output.
+    pub visible: Rgba,
+    /// The workspace number.
+    pub label: Rgba,
+    /// Number and border of the workspace holding the selection.
+    pub selected: Rgba,
+    /// Number and border of a workspace with an urgent window.
+    pub urgent: Rgba,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowColors {
+    pub normal: Class,
+    pub selected: Class,
     pub urgent: Class,
 }
 
-impl Default for Theme {
-    /// Sway's built-in colors.
-    fn default() -> Self {
-        let class = |border, background, text, indicator| Class {
-            border: Rgba(border),
-            background: Rgba(background),
-            text: Rgba(text),
-            indicator: Rgba(indicator),
-        };
-        Theme {
-            focused: class(0x4c7899ff, 0x285577ff, 0xffffffff, 0x2e9ef4ff),
-            focused_inactive: class(0x333333ff, 0x5f676aff, 0xffffffff, 0x484e50ff),
-            unfocused: class(0x333333ff, 0x222222ff, 0x888888ff, 0x292d2eff),
-            urgent: class(0x2f343aff, 0x900000ff, 0xffffffff, 0x900000ff),
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Theme {
+    pub backdrop: Rgba,
+    pub output_name: Rgba,
+    pub workspace: WorkspaceColors,
+    pub window: WindowColors,
+    /// Stripe colors apps are hashed into.
+    pub app_colors: Vec<Rgba>,
 }
-
-const MAX_INCLUDE_DEPTH: usize = 8;
 
 impl Theme {
-    /// Theme from the sway config at `path`, or the defaults.
-    pub fn load(path: Option<&Path>) -> Theme {
-        let mut parser = Parser { theme: Theme::default(), vars: Vec::new() };
-        if let Some(path) = path {
-            parser.file(path, 0);
+    /// Built-in colors, with window colors from sway's `client.*` colors.
+    fn defaults(clients: sway_config::Clients) -> Theme {
+        Theme {
+            backdrop: Rgba(0x101216e0),
+            output_name: Rgba(0x8a93a5ff),
+            workspace: WorkspaceColors {
+                fill: Rgba(0x16181dff),
+                border: Rgba(0x3a3f4bff),
+                visible: Rgba(0x6b7385ff),
+                label: Rgba(0xdde1e8ff),
+                selected: clients.focused.background,
+                urgent: clients.urgent.background,
+            },
+            window: WindowColors {
+                normal: clients.unfocused,
+                selected: clients.focused,
+                urgent: clients.urgent,
+            },
+            // About 30° apart in hue: red, orange, yellow, lime, green, teal,
+            // cyan, blue, indigo, purple, magenta, pink.
+            app_colors: [
+                0xe06c75ff, 0xe8915aff, 0xe5c07bff, 0xb5d468ff, 0x98c379ff, 0x5fc9a4ff, 0x56b6c2ff,
+                0x61afefff, 0x8a8cf0ff, 0xc678ddff, 0xe87fd0ff, 0xf78fb3ff,
+            ]
+            .map(Rgba)
+            .to_vec(),
         }
-        parser.theme
     }
-}
 
-struct Parser {
-    theme: Theme,
-    /// `$name` → value, in definition order.
-    vars: Vec<(String, String)>,
-}
-
-impl Parser {
-    fn file(&mut self, path: &Path, depth: usize) {
-        if depth > MAX_INCLUDE_DEPTH {
-            return;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else { return };
-        let dir = path.parent().unwrap_or(Path::new("/"));
-        // A trailing backslash continues the line.
-        let mut line = String::new();
-        for part in text.lines() {
-            if let Some(head) = part.strip_suffix('\\') {
-                line.push_str(head);
-            } else {
-                line.push_str(part);
-                self.line(line.trim(), dir, depth);
-                line.clear();
+    /// The theme: defaults from the sway config at `sway_config`, overridden by
+    /// the YAML file at `file` if it exists.
+    pub fn load(sway_config: Option<&Path>, file: Option<&Path>) -> Theme {
+        let mut theme = Theme::defaults(sway_config::load(sway_config));
+        if let Some(path) = file {
+            match std::fs::read_to_string(path) {
+                Ok(text) => match serde_saphyr::from_str::<ThemeFile>(&text) {
+                    Ok(f) => theme.apply(f),
+                    Err(e) => warn(format_args!("{}: {e}", path.display())),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn(format_args!("{}: {e}", path.display())),
             }
         }
-        self.line(line.trim(), dir, depth);
+        theme
     }
 
-    fn line(&mut self, line: &str, dir: &Path, depth: usize) {
-        if line.is_empty() || line.starts_with('#') {
-            return;
-        }
-        let (cmd, rest) = split_word(line);
-        match cmd {
-            "set" => {
-                let (name, value) = split_word(rest);
-                if name.starts_with('$') {
-                    let value = self.expand(value);
-                    self.vars.retain(|(n, _)| n != name);
-                    self.vars.push((name.to_string(), value));
-                }
-            }
-            "include" => {
-                for path in resolve(&expand_env(&self.expand(rest)), dir) {
-                    self.file(&path, depth + 1);
-                }
-            }
-            _ => {
-                if !cmd.starts_with("client.") {
-                    return;
-                }
-                let args = self.expand(rest);
-                let class = match cmd {
-                    "client.focused" => &mut self.theme.focused,
-                    "client.focused_inactive" => &mut self.theme.focused_inactive,
-                    "client.unfocused" => &mut self.theme.unfocused,
-                    "client.urgent" => &mut self.theme.urgent,
-                    _ => return,
-                };
-                let Some(colors) = args.split_whitespace().map(Rgba::parse).collect::<Option<Vec<_>>>()
-                else {
-                    return;
-                };
-                if let &[border, background, text, ref rest @ ..] = colors.as_slice() {
-                    let indicator = rest.first().copied().unwrap_or(class.indicator);
-                    *class = Class { border, background, text, indicator };
-                }
-            }
-        }
+    /// `$XDG_CONFIG_HOME/swayview/theme.yaml`, or `~/.config/swayview/theme.yaml`.
+    pub fn default_path() -> Option<PathBuf> {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        Some(config.join("swayview/theme.yaml"))
     }
 
-    /// Replaces `$name` variables, longest names first as sway does.
-    fn expand(&self, s: &str) -> String {
-        let mut vars: Vec<_> = self.vars.iter().collect();
-        vars.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
-        let mut out = s.to_string();
-        for (name, value) in vars {
-            out = out.replace(name.as_str(), value);
+    /// The stripe color of `app`, the same on every run; ignores case.
+    pub fn app_color(&self, app: &str) -> Rgba {
+        // FNV-1a: stable across runs and builds, unlike `DefaultHasher`.
+        let hash = app
+            .bytes()
+            .fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b.to_ascii_lowercase())).wrapping_mul(0x0100_0193));
+        self.app_colors[hash as usize % self.app_colors.len()]
+    }
+
+    fn apply(&mut self, f: ThemeFile) {
+        set(&mut self.backdrop, f.backdrop);
+        set(&mut self.output_name, f.output_name);
+        let (w, fw) = (&mut self.workspace, f.workspace);
+        set(&mut w.fill, fw.fill);
+        set(&mut w.border, fw.border);
+        set(&mut w.visible, fw.visible);
+        set(&mut w.label, fw.label);
+        set(&mut w.selected, fw.selected);
+        set(&mut w.urgent, fw.urgent);
+        let (w, fw) = (&mut self.window, f.window);
+        fw.normal.apply(&mut w.normal);
+        fw.selected.apply(&mut w.selected);
+        fw.urgent.apply(&mut w.urgent);
+        match f.app_colors {
+            Some(colors) if colors.is_empty() => warn("theme: app_colors is empty, keeping the defaults"),
+            Some(colors) => self.app_colors = colors,
+            None => {}
         }
-        out
     }
 }
 
-fn split_word(s: &str) -> (&str, &str) {
-    let s = s.trim_start();
-    match s.split_once(char::is_whitespace) {
-        Some((word, rest)) => (word, rest.trim()),
-        None => (s, ""),
+fn set(dst: &mut Rgba, value: Option<Rgba>) {
+    if let Some(v) = value {
+        *dst = v;
     }
 }
 
-/// Expands `~`, `$VAR` and `${VAR}` from the environment, as sway's wordexp does.
-fn expand_env(s: &str) -> String {
-    let s = s.trim().trim_matches('"');
-    let mut out = String::new();
-    let mut rest = match s.strip_prefix('~') {
-        Some(r) => {
-            out.push_str(&std::env::var("HOME").unwrap_or_default());
-            r
-        }
-        None => s,
-    };
-    while let Some(i) = rest.find('$') {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 1..];
-        let (name, tail) = if let Some(b) = after.strip_prefix('{') {
-            b.split_once('}').unwrap_or((b, ""))
-        } else {
-            let end = after.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(after.len());
-            after.split_at(end)
-        };
-        out.push_str(&std::env::var(name).unwrap_or_default());
-        rest = tail;
-    }
-    out.push_str(rest);
-    out
+/// `theme.yaml`: every key is optional.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ThemeFile {
+    #[serde(default, deserialize_with = "color")]
+    backdrop: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    output_name: Option<Rgba>,
+    #[serde(default)]
+    workspace: WorkspaceFile,
+    #[serde(default)]
+    window: WindowFile,
+    app_colors: Option<Vec<Rgba>>,
 }
 
-/// Paths for an include argument, relative to `dir`, with `*`/`?` in the file name.
-fn resolve(pattern: &str, dir: &Path) -> Vec<PathBuf> {
-    let path = dir.join(pattern);
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return Vec::new() };
-    if !name.contains(['*', '?']) {
-        return vec![path];
-    }
-    let parent = path.parent().unwrap_or(Path::new("/"));
-    let Ok(entries) = std::fs::read_dir(parent) else { return Vec::new() };
-    let mut paths: Vec<_> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_str().is_some_and(|n| wildcard(name.as_bytes(), n.as_bytes())))
-        .map(|e| e.path())
-        .collect();
-    paths.sort();
-    paths
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceFile {
+    #[serde(default, deserialize_with = "color")]
+    fill: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    border: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    visible: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    label: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    selected: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    urgent: Option<Rgba>,
 }
 
-fn wildcard(pattern: &[u8], s: &[u8]) -> bool {
-    match (pattern.first(), s.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => wildcard(&pattern[1..], s) || (!s.is_empty() && wildcard(pattern, &s[1..])),
-        (Some(b'?'), Some(_)) => wildcard(&pattern[1..], &s[1..]),
-        (Some(p), Some(c)) if p == c => wildcard(&pattern[1..], &s[1..]),
-        _ => false,
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct WindowFile {
+    #[serde(default)]
+    normal: ClassFile,
+    #[serde(default)]
+    selected: ClassFile,
+    #[serde(default)]
+    urgent: ClassFile,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ClassFile {
+    #[serde(default, deserialize_with = "color")]
+    border: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    background: Option<Rgba>,
+    #[serde(default, deserialize_with = "color")]
+    text: Option<Rgba>,
+}
+
+/// A color that, if the key is present, must be set; see `Rgba`'s `Deserialize`.
+fn color<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Rgba>, D::Error> {
+    Rgba::deserialize(d).map(Some)
+}
+
+impl ClassFile {
+    fn apply(self, class: &mut Class) {
+        set(&mut class.border, self.border);
+        set(&mut class.background, self.background);
+        set(&mut class.text, self.text);
     }
 }
 
@@ -206,88 +216,74 @@ fn wildcard(pattern: &[u8], s: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("swayview-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn with_file(name: &str, yaml: &str) -> Theme {
+        let path = std::env::temp_dir().join(format!("swayview-theme-{name}-{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).unwrap();
+        let theme = Theme::load(None, Some(&path));
+        let _ = std::fs::remove_file(&path);
+        theme
+    }
+
+    fn defaults() -> Theme {
+        Theme::defaults(sway_config::Clients::default())
     }
 
     #[test]
-    fn missing_config_gives_defaults() {
-        assert_eq!(Theme::load(None), Theme::default());
-        assert_eq!(Theme::load(Some(Path::new("/nonexistent/config"))), Theme::default());
+    fn no_file_gives_defaults() {
+        assert_eq!(Theme::load(None, None), defaults());
+        assert_eq!(Theme::load(None, Some(Path::new("/nonexistent/theme.yaml"))), defaults());
     }
 
     #[test]
-    fn reads_variables_includes_and_short_forms() {
-        let dir = temp_dir("theme");
-        std::fs::create_dir(dir.join("config.d")).unwrap();
-        std::fs::write(
-            dir.join("config"),
-            "set $bg #101010\nset $bg2 #202020cc\n\
-             client.focused #111111 $bg #eeeeee #ff0000 #00ff00\n\
-             client.unfocused not-a-color #000000 #ffffff\n\
-             include config.d/*\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("config.d/10-colors"), "client.unfocused #222222 $bg2 #999999\n").unwrap();
-        std::fs::write(dir.join("config.d/20-other"), "# nothing\nbindsym x exec y\n").unwrap();
+    fn selected_workspace_defaults_to_the_active_color() {
+        let t = defaults();
+        assert_eq!(t.workspace.selected, t.window.selected.background);
+    }
 
-        let t = Theme::load(Some(&dir.join("config")));
-        let d = Theme::default();
-        assert_eq!(
-            t.focused,
-            Class {
-                border: Rgba(0x111111ff),
-                background: Rgba(0x101010ff),
-                text: Rgba(0xeeeeeeff),
-                indicator: Rgba(0xff0000ff),
-            }
+    #[test]
+    fn file_overrides_only_what_it_sets() {
+        let t = with_file(
+            "partial",
+            r##"
+backdrop: "#000000cc"
+workspace:
+  selected: "#00ffff"
+window:
+  selected:
+    background: "#123456"
+app_colors: ["#ff0000", "#00ff00"]
+"##,
         );
-        // Short form: indicator kept from the default.
-        assert_eq!(
-            t.unfocused,
-            Class {
-                border: Rgba(0x222222ff),
-                background: Rgba(0x202020cc),
-                text: Rgba(0x999999ff),
-                indicator: d.unfocused.indicator,
-            }
-        );
-        assert_eq!(t.focused_inactive, d.focused_inactive);
-        assert_eq!(t.urgent, d.urgent);
-        let _ = std::fs::remove_dir_all(&dir);
+        let d = defaults();
+        assert_eq!(t.backdrop, Rgba(0x000000cc));
+        assert_eq!(t.workspace.selected, Rgba(0x00ffffff));
+        assert_eq!(t.workspace.label, d.workspace.label);
+        assert_eq!(t.window.selected.background, Rgba(0x123456ff));
+        assert_eq!(t.window.selected.text, d.window.selected.text);
+        assert_eq!(t.window.normal, d.window.normal);
+        assert_eq!(t.app_colors, [Rgba(0xff0000ff), Rgba(0x00ff00ff)]);
     }
 
     #[test]
-    fn include_cycles_terminate() {
-        let dir = temp_dir("cycle");
-        std::fs::write(dir.join("config"), "include config\nclient.focused #010101 #020202 #030303\n")
-            .unwrap();
-        let t = Theme::load(Some(&dir.join("config")));
-        assert_eq!(t.focused.border, Rgba(0x010101ff));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn bad_files_are_ignored() {
+        assert_eq!(with_file("color", "backdrop: \"#12\"\n"), defaults());
+        assert_eq!(with_file("unknown", "backdrop: \"#123456\"\nbackground: \"#000000\"\n"), defaults());
+        assert_eq!(with_file("syntax", "workspace: [unclosed\n"), defaults());
+        assert_eq!(with_file("empty-colors", "app_colors: []\n").app_colors, defaults().app_colors);
+        assert_eq!(with_file("empty", ""), defaults());
+        // Unquoted, `#` starts a comment and the value is empty.
+        assert_eq!(with_file("unquoted", "backdrop: #000000\n"), defaults());
+        assert_eq!(with_file("unquoted-list", "app_colors:\n  - #ff0000\n"), defaults());
     }
 
     #[test]
-    fn line_continuation() {
-        let dir = temp_dir("continuation");
-        let config = "client.focused #010101 \\\n  #020202 #030303\nclient.urgent #0a0a0a #0b0b0b #0c0c0c\n";
-        std::fs::write(dir.join("config"), config).unwrap();
-        let t = Theme::load(Some(&dir.join("config")));
-        assert_eq!(t.focused.background, Rgba(0x020202ff));
-        assert_eq!(t.urgent.background, Rgba(0x0b0b0bff));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn env_expansion() {
-        let home = std::env::var("HOME").unwrap_or_default();
-        assert_eq!(expand_env("$HOME/a"), format!("{home}/a"));
-        assert_eq!(expand_env("${HOME}b/*"), format!("{home}b/*"));
-        assert_eq!(expand_env("~/c"), format!("{home}/c"));
-        assert!(wildcard(b"*.conf", b"50-colors.conf"));
-        assert!(!wildcard(b"*.conf", b"colors.ini"));
+    fn app_colors_are_stable_and_ignore_case() {
+        let t = defaults();
+        assert_eq!(t.app_color("Alacritty"), t.app_color("alacritty"));
+        // Apps that shared a color with a smaller palette.
+        assert_ne!(t.app_color("Alacritty"), t.app_color("brave-browser"));
+        let apps = ["foot", "firefox", "code", "Slack", "discord", "Alacritty", "pavucontrol"];
+        let distinct: std::collections::HashSet<_> = apps.iter().map(|a| t.app_color(a).0).collect();
+        assert!(distinct.len() > 2);
     }
 }
