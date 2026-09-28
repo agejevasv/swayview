@@ -12,12 +12,10 @@ use crate::layout::{HEADER, Scene, WinItem};
 use crate::model::Rect;
 use crate::theme::Theme;
 
-/// Alpha of the app line relative to the title line.
-const APP_FADE: u8 = 0xb0;
+/// Alpha of the title line relative to the app line.
+const TITLE_FADE: u8 = 0xb0;
 
 const PAD: f32 = 6.0;
-/// Width of the app color stripe along a window's left edge.
-const STRIPE: f32 = 3.0;
 const LINE_HEIGHT: f32 = 1.3;
 /// Narrower windows get no text.
 const MIN_TEXT_WIDTH: f32 = 12.0;
@@ -44,8 +42,8 @@ impl TextStyle {
     }
 }
 
-const TITLE: TextStyle = TextStyle::new(14.0, true);
-const APP: TextStyle = TextStyle::new(12.0, false);
+const APP_LINE: TextStyle = TextStyle::new(14.0, true);
+const TITLE_LINE: TextStyle = TextStyle::new(12.0, false);
 const WS_LABEL: TextStyle = TextStyle::new(16.0, true);
 const OUTPUT_LABEL: TextStyle = TextStyle::new(13.0, false);
 
@@ -83,18 +81,15 @@ impl Renderer {
 
         let c = &theme.workspace;
         for (i, ws) in scene.workspaces.iter().enumerate() {
-            let selected = view.selected_workspace == Some(i);
-            let (border, label, width) = if selected {
-                (c.selected, c.selected, 2.0)
+            // Only the number marks the selected or urgent workspace.
+            let label = if view.selected_workspace == Some(i) {
+                c.selected
             } else if ws.urgent {
-                (c.urgent, c.urgent, 2.0)
-            } else if ws.visible {
-                (c.visible, c.label, 1.0)
+                c.urgent
             } else {
-                (c.border, c.label, 1.0)
+                c.label
             };
             fill(&mut pix, ws.rect, 6.0, c.fill, t);
-            stroke(&mut pix, ws.rect, 6.0, border, width, t);
             let r = Rect::new(ws.header.x + 2.0, ws.header.y, ws.header.w - 4.0, HEADER);
             self.text.draw(&mut pix, &ws.name, r, WS_LABEL.color(label), scale);
         }
@@ -111,27 +106,21 @@ impl Renderer {
             };
             let (border, width) = (class.border, if selected { 2.0 } else { 1.0 });
             fill(&mut pix, win.rect, 4.0, class.background, t);
-            // Inside the border, so a thick selection outline does not hide it.
-            let stripe = Rect::new(win.rect.x + width, win.rect.y + width, STRIPE, win.rect.h - 2.0 * width);
-            fill(&mut pix, stripe, 1.5, theme.app_color(&win.app), t);
             stroke(&mut pix, win.rect, 4.0, border, width, t);
 
             let inner = win.rect.inset(PAD);
-            let inner = Rect::new(inner.x + STRIPE, inner.y, inner.w - STRIPE, inner.h);
-            if inner.w < MIN_TEXT_WIDTH {
+            let (app, title) = (APP_LINE.color(class.text), TITLE_LINE.color(class.text.fade(TITLE_FADE)));
+            if inner.w < MIN_TEXT_WIDTH || inner.h < app.line_height() {
                 continue;
             }
             let (first, second) = lines(win);
-            let (title, app) = (TITLE.color(class.text), APP.color(class.text.fade(APP_FADE)));
-            if inner.h >= title.line_height() {
-                let r = Rect::new(inner.x, inner.y, inner.w, title.line_height());
-                self.text.draw(&mut pix, first, r, title, scale);
-            }
+            let r = Rect::new(inner.x, inner.y, inner.w, app.line_height());
+            self.text.draw(&mut pix, first, r, app, scale);
             if let Some(second) = second
-                && inner.h >= title.line_height() + app.line_height()
+                && inner.h >= app.line_height() + title.line_height()
             {
-                let r = Rect::new(inner.x, inner.y + title.line_height(), inner.w, app.line_height());
-                self.text.draw(&mut pix, &second, r, app, scale);
+                let r = Rect::new(inner.x, inner.y + app.line_height(), inner.w, title.line_height());
+                self.text.draw(&mut pix, &second, r, title, scale);
             }
         }
         Some(pix)
@@ -166,15 +155,11 @@ impl Text {
     }
 }
 
-/// The two text lines of a window: the title, which tells windows of one app
-/// apart, then the app name and state tags. Without a title the app goes first.
+/// The two text lines of a window: the app name, then the title and state tags.
 fn lines(win: &WinItem) -> (&str, Option<String>) {
-    let (first, rest) = if win.title.is_empty() {
-        (win.app.as_str(), win.tags.clone())
-    } else {
-        (win.title.as_str(), std::iter::once(win.app.as_str()).chain(win.tags.iter().copied()).collect())
-    };
-    (first, (!rest.is_empty()).then(|| rest.join(" · ")))
+    let title = (!win.title.is_empty()).then_some(win.title.as_str());
+    let rest: Vec<&str> = title.into_iter().chain(win.tags.iter().copied()).collect();
+    (&win.app, (!rest.is_empty()).then(|| rest.join(" · ")))
 }
 
 /// Source-over blend of a straight-alpha text color onto a premultiplied pixel.
@@ -254,13 +239,13 @@ mod tests {
 
     #[test]
     fn text_lines() {
-        assert_eq!(lines(&win("htop", "foot", vec![])), ("htop", Some("foot".into())));
+        assert_eq!(lines(&win("btop", "Alacritty", vec![])), ("Alacritty", Some("btop".into())));
         assert_eq!(
-            lines(&win("htop", "foot", vec!["float", "sticky"])),
-            ("htop", Some("foot · float · sticky".into()))
+            lines(&win("btop", "Alacritty", vec!["float", "sticky"])),
+            ("Alacritty", Some("btop · float · sticky".into()))
         );
-        assert_eq!(lines(&win("", "foot", vec![])), ("foot", None));
-        assert_eq!(lines(&win("", "foot", vec!["float"])), ("foot", Some("float".into())));
+        assert_eq!(lines(&win("", "Alacritty", vec![])), ("Alacritty", None));
+        assert_eq!(lines(&win("", "Alacritty", vec!["float"])), ("Alacritty", Some("float".into())));
     }
 
     #[test]

@@ -100,8 +100,6 @@ pub struct Workspace {
     pub num: Option<i32>,
     /// Contains the focused window, or is itself focused (empty workspace).
     pub focused: bool,
-    /// Currently shown on its output.
-    pub visible: bool,
     /// In drawing order: tiled, then floating.
     pub windows: Vec<Window>,
 }
@@ -147,12 +145,11 @@ impl Tree {
             .iter()
             .filter(|o| o.ty == NodeType::Output && !o.name_str().starts_with("__"))
             .map(|o| {
-                let current = o.current_workspace.as_deref();
                 let workspaces = o
                     .nodes
                     .iter()
                     .filter(|w| w.ty == NodeType::Workspace)
-                    .map(|w| workspace(w, o.rect.into(), current))
+                    .map(|w| workspace(w, o.rect.into()))
                     .collect();
                 Output { name: o.name_str().to_string(), rect: o.rect.into(), workspaces }
             })
@@ -221,7 +218,7 @@ impl Tree {
     }
 }
 
-fn workspace(node: &Node, output_rect: Rect, current: Option<&str>) -> Workspace {
+fn workspace(node: &Node, output_rect: Rect) -> Workspace {
     let mut c = Collector { floating: false, in_fullscreen: false, windows: Vec::new() };
     c.children(node, node.rect.into());
     c.floating = true;
@@ -242,7 +239,6 @@ fn workspace(node: &Node, output_rect: Rect, current: Option<&str>) -> Workspace
         name: node.name_str().to_string(),
         num: node.num.filter(|n| *n >= 0),
         focused: node.focused || node.any_focused(),
-        visible: current == Some(node.name_str()),
         windows,
     }
 }
@@ -389,7 +385,6 @@ struct Node {
     fullscreen_mode: u8,
     /// Share of the parent container along its split axis.
     percent: Option<f32>,
-    current_workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -586,7 +581,6 @@ pub(crate) mod tests {
             num: None,
             fullscreen_mode,
             percent,
-            current_workspace: None,
         };
         assert_eq!(
             shares(&[node(0, Some(0.25)), node(1, Some(2.0)), node(0, Some(0.25))]),

@@ -15,7 +15,6 @@ pub struct WsItem {
     pub header: Rect,
     pub rect: Rect,
     pub focused: bool,
-    pub visible: bool,
     /// Holds a window asking for attention.
     pub urgent: bool,
 }
@@ -136,7 +135,6 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
             header: Rect::new(x, y, box_w, HEADER),
             rect,
             focused: ws.focused,
-            visible: ws.visible,
             urgent: ws.windows.iter().any(|w| w.urgent),
         });
     }

@@ -66,11 +66,10 @@ Each output shows its own workspaces, rendered at that output's scale
 
 ## Theme
 
-Windows show their title, then the app name and any of `float`,
-`fullscreen` and `sticky`, with a stripe on the left edge in a color picked
-from the app name (the same for every window of that app). The selection
-starts on the focused window and moves with the keys and mouse; it and its
-workspace number use the active color.
+Windows show their app name, then the title and any of `float`,
+`fullscreen` and `sticky`. The selection starts on the focused window and
+moves with the keys and mouse; it and its workspace number use the active
+color.
 
 By default window colors come from `client.focused` (selected),
 `client.unfocused` and `client.urgent` in the config sway loaded, following
@@ -79,20 +78,21 @@ By default window colors come from `client.focused` (selected),
 Any color can be set in `~/.config/swayview/theme.yaml` (or
 `$XDG_CONFIG_HOME/swayview/theme.yaml`). Every key is optional; unset keys keep
 their default. Colors are `"#rrggbb"` or `"#rrggbbaa"` and must be quoted,
-since `#` starts a YAML comment. A file that cannot be read is reported and
-ignored.
+since `#` starts a YAML comment. Unknown keys are reported and skipped; a file
+that cannot be read or parsed is reported and ignored. Warnings go to stderr,
+which is sway's log when started from a binding, so run `swayview` in a
+terminal to see them.
 
 ```yaml
 backdrop: "#101216e0"      # behind everything
 output_name: "#8a93a5"     # e.g. "eDP-1", top left
 workspace:
   fill: "#16181d"
-  border: "#3a3f4b"
-  visible: "#6b7385"       # border of a workspace shown on its output
   label: "#dde1e8"         # workspace number
-  selected: "#285577"      # number and border of the selection's workspace
+  selected: "#285577"      # number of the selection's workspace
                            # (default: client.focused background)
-  urgent: "#900000"        # default: client.urgent background
+  urgent: "#900000"        # number of a workspace with an urgent window
+                           # (default: client.urgent background)
 window:
   normal:                  # default: client.unfocused
     border: "#333333"
@@ -106,17 +106,4 @@ window:
     border: "#2f343a"
     background: "#900000"
     text: "#ffffff"
-app_colors:                # stripe colors apps are hashed into
-  - "#e06c75"
-  - "#e8915a"
-  - "#e5c07b"
-  - "#b5d468"
-  - "#98c379"
-  - "#5fc9a4"
-  - "#56b6c2"
-  - "#61afef"
-  - "#8a8cf0"
-  - "#c678dd"
-  - "#e87fd0"
-  - "#f78fb3"
 ```
