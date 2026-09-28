@@ -1,0 +1,12 @@
+[package]
+name = "fake-window"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Blank Wayland window with a chosen app_id and title, for faking sway layouts in tests"
+
+[dependencies]
+smithay-client-toolkit.workspace = true
+
+[lints]
+workspace = true

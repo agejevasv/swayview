@@ -1,6 +1,6 @@
 //! Plain test window with a chosen `app_id` and title, for faking sway layouts.
 //!
-//!     cargo run --example dummy -- firefox "GitHub - Mozilla Firefox"
+//!     cargo run -p fake-window -- firefox "GitHub - Mozilla Firefox"
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},

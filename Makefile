@@ -26,16 +26,16 @@ uninstall:
 check: fmt-check lint test
 
 fmt:
-	$(CARGO) fmt
+	$(CARGO) fmt --all
 
 fmt-check:
-	$(CARGO) fmt --check
+	$(CARGO) fmt --all --check
 
 lint:
-	$(CARGO) clippy --all-targets --locked -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 
 test:
-	$(CARGO) test --locked
+	$(CARGO) test --workspace --locked
 
 clean:
 	$(CARGO) clean

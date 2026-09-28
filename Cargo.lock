@@ -173,6 +173,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fake-window"
+version = "0.1.0"
+dependencies = [
+ "smithay-client-toolkit",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

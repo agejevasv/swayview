@@ -24,9 +24,17 @@ Development:
 | `make lint`  | clippy on all targets with warnings as errors |
 | `make test`  | unit tests                                    |
 
-Lints are configured in `Cargo.toml`: `unsafe` is forbidden, and clippy's
-`pedantic` group is on apart from numeric-cast lints and a couple of
-style lints that fight geometry code.
+Lints are configured in `Cargo.toml` for the whole workspace: `unsafe` is
+forbidden, and clippy's `pedantic` group is on apart from numeric-cast lints
+and a couple of style lints that fight geometry code.
+
+`tools/fake-window` opens a blank window with a chosen app_id and title, for
+building test layouts in a headless sway. The trees in `tests/fixtures` were
+made that way, with `swaymsg -t get_tree`.
+
+```sh
+cargo run -p fake-window -- firefox "GitHub - Mozilla Firefox"
+```
 
 ## sway config
 
