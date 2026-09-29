@@ -32,7 +32,13 @@ jobs:
           cp target/release/swayview README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      # Also works when the release was made on GitHub first, which pushes the tag.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" swayview-*.tar.gz* --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" swayview-*.tar.gz* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" swayview-*.tar.gz* --title "$GITHUB_REF_NAME" --generate-notes
+          fi

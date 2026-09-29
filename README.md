@@ -63,7 +63,8 @@ cargo run -p fake-window -- firefox "GitHub - Mozilla Firefox"
 ## Releases
 
 Pushing a tag that matches the version in `Cargo.toml`, like `v0.1.0`, runs
-the checks, builds the x86_64 binary and publishes it as a GitHub release.
+the checks, builds the x86_64 binary and publishes it as a GitHub release. If
+the release was created on GitHub first, the binary is added to it.
 
 ## sway config
 
