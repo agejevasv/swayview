@@ -75,12 +75,3 @@ colors:                   # quote colors, since # starts a YAML comment
       background: "#900000"
       text: "#ffffff"
 ```
-
-## Development
-
-```sh
-make check                                        # fmt, clippy, tests
-cargo run -p fake-window -- firefox "GitHub"      # test window with an app_id and title
-```
-
-To release, push a tag that matches the version in `Cargo.toml`.
