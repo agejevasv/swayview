@@ -7,10 +7,10 @@ use cosmic_text::{
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
 use crate::color::Rgba;
+use crate::config::{Colors, Config, Font, Fonts};
 use crate::fonts;
 use crate::layout::{HEADER, Scene, WinItem};
 use crate::model::Rect;
-use crate::theme::Theme;
 
 /// Alpha of the title line relative to the app line.
 const TITLE_FADE: u8 = 0xb0;
@@ -19,31 +19,28 @@ const PAD: f32 = 6.0;
 const LINE_HEIGHT: f32 = 1.3;
 const MIN_TEXT_WIDTH: f32 = 12.0;
 
+const WS_LABEL_SIZE: f32 = 16.0;
+const OUTPUT_LABEL_SIZE: f32 = 13.0;
+
 #[derive(Clone, Copy, Debug)]
-struct TextStyle {
+struct TextStyle<'a> {
+    family: &'a str,
     size: f32,
     bold: bool,
     color: Rgba,
 }
 
-impl TextStyle {
-    const fn new(size: f32, bold: bool) -> Self {
-        TextStyle { size, bold, color: Rgba(0xffffffff) }
-    }
-
-    fn color(self, color: Rgba) -> Self {
-        TextStyle { color, ..self }
-    }
-
-    fn line_height(self) -> f32 {
+impl TextStyle<'_> {
+    fn line_height(&self) -> f32 {
         self.size * LINE_HEIGHT
     }
 }
 
-const APP_LINE: TextStyle = TextStyle::new(14.0, true);
-const TITLE_LINE: TextStyle = TextStyle::new(12.0, false);
-const WS_LABEL: TextStyle = TextStyle::new(16.0, true);
-const OUTPUT_LABEL: TextStyle = TextStyle::new(13.0, false);
+impl Font {
+    fn style(&self, size: f32, bold: bool, color: Rgba) -> TextStyle<'_> {
+        TextStyle { family: &self.family, size, bold, color }
+    }
+}
 
 #[derive(Debug)]
 pub struct View {
@@ -54,7 +51,9 @@ pub struct View {
 
 pub struct Renderer {
     text: Text,
-    theme: Theme,
+    /// With the family names fontconfig resolved.
+    fonts: Fonts,
+    colors: Colors,
 }
 
 struct Text {
@@ -63,20 +62,23 @@ struct Text {
 }
 
 impl Renderer {
-    pub fn new(theme: Theme) -> Self {
-        Renderer { text: Text { fonts: fonts::font_system(), cache: SwashCache::new() }, theme }
+    pub fn new(config: Config) -> Self {
+        let Config { mut fonts, colors } = config;
+        let (system, [app, title]) = fonts::load([(&fonts.app.family, true), (&fonts.title.family, false)]);
+        (fonts.app.family, fonts.title.family) = (app, title);
+        Renderer { text: Text { fonts: system, cache: SwashCache::new() }, fonts, colors }
     }
 
     /// Renders at `scale` physical pixels per logical pixel; `None` if `w` or `h` is 0.
     pub fn draw(&mut self, scene: &Scene, view: &View, w: u32, h: u32, scale: f32) -> Option<Pixmap> {
         let mut pix = Pixmap::new(w, h)?;
-        let theme = &self.theme;
-        pix.fill(theme.backdrop.into());
+        let (fonts, colors) = (&self.fonts, &self.colors);
+        pix.fill(colors.backdrop.into());
         let t = Transform::from_scale(scale, scale);
-        let output_name = OUTPUT_LABEL.color(theme.output_name);
+        let output_name = fonts.title.style(OUTPUT_LABEL_SIZE, false, colors.output_name);
         self.text.draw(&mut pix, &scene.output_name, scene.output_label, output_name, scale);
 
-        let c = &theme.workspace;
+        let c = &colors.workspace;
         for (i, ws) in scene.workspaces.iter().enumerate() {
             // Only the number marks the selected or urgent workspace.
             let label = if view.selected_workspace == Some(i) {
@@ -88,24 +90,25 @@ impl Renderer {
             };
             fill(&mut pix, ws.rect, 6.0, c.fill, t);
             let r = Rect::new(ws.header.x + 2.0, ws.header.y, ws.header.w - 4.0, HEADER);
-            self.text.draw(&mut pix, &ws.name, r, WS_LABEL.color(label), scale);
+            self.text.draw(&mut pix, &ws.name, r, fonts.app.style(WS_LABEL_SIZE, true, label), scale);
         }
 
         for (i, win) in scene.windows.iter().enumerate() {
             let selected = view.selected == Some(i);
             let class = if selected {
-                theme.window.selected
+                colors.window.selected
             } else if win.urgent {
-                theme.window.urgent
+                colors.window.urgent
             } else {
-                theme.window.normal
+                colors.window.normal
             };
             let (border, width) = (class.border, if selected { 2.0 } else { 1.0 });
             fill(&mut pix, win.rect, 4.0, class.background, t);
             stroke(&mut pix, win.rect, 4.0, border, width, t);
 
             let inner = win.rect.inset(PAD);
-            let (app, title) = (APP_LINE.color(class.text), TITLE_LINE.color(class.text.fade(TITLE_FADE)));
+            let app = fonts.app.style(fonts.app.size, true, class.text);
+            let title = fonts.title.style(fonts.title.size, false, class.text.fade(TITLE_FADE));
             if inner.w < MIN_TEXT_WIDTH || inner.h < app.line_height() {
                 continue;
             }
@@ -125,14 +128,15 @@ impl Renderer {
 
 impl Text {
     /// Single line of text, vertically centered in `r`, ellipsized to its width.
-    fn draw(&mut self, pix: &mut Pixmap, s: &str, r: Rect, style: TextStyle, scale: f32) {
+    fn draw(&mut self, pix: &mut Pixmap, s: &str, r: Rect, style: TextStyle<'_>, scale: f32) {
         let line_h = style.line_height();
         let mut buf = Buffer::new(&mut self.fonts, Metrics::new(style.size * scale, line_h * scale));
         buf.set_wrap(Wrap::None);
         buf.set_ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
         buf.set_size(Some(r.w * scale), Some(line_h * scale));
         let weight = if style.bold { Weight::BOLD } else { Weight::NORMAL };
-        buf.set_text(s, &Attrs::new().family(Family::SansSerif).weight(weight), Shaping::Advanced, None);
+        let attrs = Attrs::new().family(family(style.family)).weight(weight);
+        buf.set_text(s, &attrs, Shaping::Advanced, None);
 
         let origin = ((r.x * scale).round() as i32, ((r.y + (r.h - line_h) / 2.0) * scale).round() as i32);
         let (pw, ph) = (pix.width() as i32, pix.height() as i32);
@@ -148,6 +152,16 @@ impl Text {
                 }
             }
         });
+    }
+}
+
+/// Generic names only reach here when fontconfig was not available to resolve them.
+fn family(name: &str) -> Family<'_> {
+    match name {
+        "sans-serif" => Family::SansSerif,
+        "serif" => Family::Serif,
+        "monospace" => Family::Monospace,
+        _ => Family::Name(name),
     }
 }
 
@@ -246,7 +260,7 @@ mod tests {
 
     #[test]
     fn zero_size_is_none_not_a_panic() {
-        let mut r = Renderer::new(Theme::load(None));
+        let mut r = Renderer::new(Config::load(None));
         let view = View { selected: None, selected_workspace: None };
         assert!(r.draw(&Scene::default(), &view, 0, 10, 1.0).is_none());
         assert!(r.draw(&Scene::default(), &view, 10, 10, 1.0).is_some());

@@ -1,4 +1,5 @@
 mod color;
+mod config;
 mod fonts;
 mod input;
 mod layout;
@@ -6,16 +7,15 @@ mod model;
 mod render;
 mod sway;
 mod sway_config;
-mod theme;
 mod wayland;
 
 use std::fmt::Display;
 
 use anyhow::{Context, Result, bail, ensure};
 
+use crate::config::Config;
 use crate::model::Tree;
 use crate::render::{Renderer, View};
-use crate::theme::Theme;
 
 const USAGE: &str = "\
 usage: swayview
@@ -74,8 +74,8 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
         Some(path) => Tree::from_json(&std::fs::read(path).with_context(|| format!("reading {path}"))?)?,
         None => sway::Ipc::connect()?.get_tree()?,
     };
-    let config = sway::Ipc::connect().and_then(|mut ipc| ipc.config_path()).ok();
-    let theme = Theme::load(config.as_deref());
+    let sway_config = sway::Ipc::connect().and_then(|mut ipc| ipc.config_path()).ok();
+    let config = Config::load(sway_config.as_deref());
     let output = match &args.output {
         Some(name) => tree.output(name),
         None => tree.focused_output().or(tree.outputs.first()),
@@ -85,7 +85,7 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
     let scene = layout::build(output, w as f32, h as f32);
     let selected = scene.focused_window();
     let view = View { selected, selected_workspace: scene.selected_workspace(selected) };
-    let pix = Renderer::new(theme).draw(&scene, &view, w, h, 1.0).context("image size is zero")?;
+    let pix = Renderer::new(config).draw(&scene, &view, w, h, 1.0).context("image size is zero")?;
     pix.save_png(out).with_context(|| format!("writing {out}"))?;
     Ok(())
 }

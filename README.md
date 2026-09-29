@@ -38,38 +38,42 @@ bindsym $mod+Tab exec pkill -x swayview || swayview
 | 1 … 9, 0                | go to workspace 1 … 10     |
 | Esc, click outside      | close                      |
 
-## Theme
+## Config
 
-Window colors come from `client.focused`, `client.unfocused` and
-`client.urgent` in your sway config.
-
-To change any color, create `~/.config/swayview/theme.yaml` with just the keys
-you want. Quote the colors, since `#` starts a YAML comment. Mistakes are
-reported on stderr, so run `swayview` in a terminal to see them.
+Create `~/.config/swayview/config.yaml` with just the keys you want to change.
+Mistakes are reported on stderr, so run `swayview` in a terminal to see them.
 
 All keys, with their defaults:
 
 ```yaml
-backdrop: "#101216e0"
-output_name: "#8a93a5"
-workspace:
-  fill: "#16181d"
-  label: "#dde1e8"      # workspace number
-  selected: "#285577"   # number of the workspace with the selection
-  urgent: "#900000"     # number of a workspace with an urgent window
-window:
-  normal:
-    border: "#333333"
-    background: "#222222"
-    text: "#888888"
-  selected:
-    border: "#4c7899"
-    background: "#285577"
-    text: "#ffffff"
-  urgent:
-    border: "#2f343a"
-    background: "#900000"
-    text: "#ffffff"
+fonts:
+  app:                    # app name line, and workspace numbers
+    family: "sans-serif"  # any fontconfig family, e.g. "Inter" or "monospace"
+    size: 14
+  title:                  # title line, and output name
+    family: "sans-serif"
+    size: 12
+colors:                   # quote colors, since # starts a YAML comment
+  backdrop: "#101216e0"
+  output_name: "#8a93a5"
+  workspace:
+    fill: "#16181d"
+    label: "#dde1e8"      # workspace number
+    selected: "#285577"   # number of the workspace with the selection
+    urgent: "#900000"     # number of a workspace with an urgent window
+  window:                 # default to client.* colors from your sway config
+    normal:
+      border: "#333333"
+      background: "#222222"
+      text: "#888888"
+    selected:
+      border: "#4c7899"
+      background: "#285577"
+      text: "#ffffff"
+    urgent:
+      border: "#2f343a"
+      background: "#900000"
+      text: "#ffffff"
 ```
 
 ## Development

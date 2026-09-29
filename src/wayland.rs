@@ -47,12 +47,12 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
+use crate::config::Config;
 use crate::input::{self, Action, Key, Sel};
 use crate::layout::{self, Dir, Scene};
 use crate::model::{Focus, Tree};
 use crate::render::{Renderer, View};
 use crate::sway::Ipc;
-use crate::theme::Theme;
 use crate::warn;
 
 const BTN_LEFT: u32 = 0x110;
@@ -195,7 +195,7 @@ impl App {
     ) -> Result<Self> {
         let mut ipc = Ipc::connect()?;
         let tree = ipc.get_tree()?;
-        let theme = Theme::load(ipc.config_path().ok().as_deref());
+        let config = Config::load(ipc.config_path().ok().as_deref());
         let shm = Shm::bind(globals, qh).context("wl_shm")?;
         Ok(App {
             registry_state: RegistryState::new(globals),
@@ -211,7 +211,7 @@ impl App {
             shm,
             qh: qh.clone(),
             loop_handle,
-            renderer: Renderer::new(theme),
+            renderer: Renderer::new(config),
             ipc,
             initial_focus: tree.focus(),
             tree,

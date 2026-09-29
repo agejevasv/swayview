@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::color::Rgba;
-use crate::theme::Class;
+use crate::config::Class;
 
 /// The `client.*` colors swayview uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
