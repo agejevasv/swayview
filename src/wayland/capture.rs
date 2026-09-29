@@ -1,24 +1,17 @@
 //! Window thumbnails, captured once per window with `ext-image-copy-capture-v1`
-//! (sway 1.11 and later). Windows without one are drawn as plain boxes.
-//!
-//! Thumbnails are held back until every window is captured, then fade in
-//! together. After `WAIT_LIMIT`, they show as they arrive, and a capture sway
-//! has not answered by then is given up.
+//! (sway 1.11 and later), each shown as soon as it arrives. Windows without
+//! one are drawn as plain boxes.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use smithay_client_toolkit::{
     dispatch2::Dispatch2,
     foreign_toplevel_list::{ForeignToplevelList, ForeignToplevelListHandler},
-    reexports::{
-        calloop::timer::{TimeoutAction, Timer},
-        client::{
-            Connection, QueueHandle, WEnum,
-            globals::GlobalList,
-            protocol::{wl_buffer::WlBuffer, wl_shm},
-        },
+    reexports::client::{
+        Connection, QueueHandle, WEnum,
+        globals::GlobalList,
+        protocol::{wl_buffer::WlBuffer, wl_shm},
     },
     shm::{Shm, raw::RawPool},
 };
@@ -40,12 +33,8 @@ use super::{App, NoEvents, render_scale};
 use crate::render::Thumb;
 use crate::warn;
 
-/// Captures running at once; each holds a full-size copy of its window.
-const MAX_JOBS: usize = 4;
 /// Larger windows are not captured; keeps buffer sizes well within `i32`.
 const MAX_SIDE: u32 = 16384;
-const WAIT_LIMIT: Duration = Duration::from_secs(1);
-const FADE: Duration = Duration::from_millis(200);
 
 /// In order of preference: with alpha first, so translucent windows stay translucent.
 const FORMATS: [wl_shm::Format; 4] =
@@ -58,12 +47,6 @@ pub struct Capture {
     /// Windows captured or being captured, by identifier; each is captured once.
     started: HashSet<String>,
     jobs: HashMap<String, Job>,
-    /// Captured, not shown yet.
-    ready: Vec<String>,
-    /// Until `WAIT_LIMIT` passes; after that, thumbnails show as they arrive.
-    waiting: bool,
-    /// Thumbnails fading in, with when they started.
-    fading: Vec<(String, Instant)>,
 }
 
 /// One window being captured.
@@ -78,7 +61,6 @@ struct Job {
     frame: Option<Frame>,
     /// A frame failed because the window changed size, and was asked for again.
     retried: bool,
-    since: Instant,
 }
 
 struct Frame {
@@ -103,9 +85,6 @@ impl Capture {
             copier,
             started: HashSet::new(),
             jobs: HashMap::new(),
-            ready: Vec::new(),
-            waiting: true,
-            fading: Vec::new(),
         })
     }
 
@@ -123,16 +102,8 @@ impl Capture {
     ) {
         let source = self.sources.create_source(handle, qh, NoEvents);
         let session = self.copier.create_session(&source, Options::empty(), qh, JobId(id.to_owned()));
-        let job = Job {
-            source,
-            session,
-            target,
-            size: (0, 0),
-            formats: Vec::new(),
-            frame: None,
-            retried: false,
-            since: Instant::now(),
-        };
+        let job =
+            Job { source, session, target, size: (0, 0), formats: Vec::new(), frame: None, retried: false };
         self.started.insert(id.to_owned());
         self.jobs.insert(id.to_owned(), job);
     }
@@ -164,7 +135,7 @@ impl Job {
         let f = self.frame.as_mut()?;
         let (w, h) = f.size;
         let data = f.pool.mmap().get(..w as usize * h as usize * 4)?;
-        Some(shrink(to_pixmap(data, w, h, f.format)?, self.target))
+        thumbnail_of(data, w, h, f.format, self.target)
     }
 }
 
@@ -184,65 +155,31 @@ impl Drop for Job {
 }
 
 impl App {
-    /// Stops holding thumbnails back once `WAIT_LIMIT` has passed, and from
-    /// then on every `WAIT_LIMIT` gives up captures older than that, which
-    /// would otherwise hold their slot forever.
-    pub(super) fn limit_capture_wait(&self) {
-        if self.capture.is_none() {
-            return;
-        }
-        let timer = Timer::from_duration(WAIT_LIMIT);
-        let inserted = self.loop_handle.insert_source(timer, |_, (), app| {
-            if let Some(capture) = &mut app.capture {
-                capture.waiting = false;
-                capture.jobs.retain(|_, job| job.since.elapsed() < WAIT_LIMIT);
-            }
-            app.capture_windows();
-            TimeoutAction::ToDuration(WAIT_LIMIT)
-        });
-        if let Err(e) = inserted {
-            warn(format_args!("capture timer: {}", e.error));
-        }
-    }
-
-    /// Starts capturing the windows shown on any surface, a few at a time,
-    /// and shows the thumbnails once all are in.
+    /// Starts capturing the windows shown on any surface, all at once.
     pub(super) fn capture_windows(&mut self) {
         let Some(capture) = &mut self.capture else { return };
-        // Windows are known once their surface is configured and laid out.
-        let mut all_started = self.surfaces.iter().all(|s| s.size.is_some());
         for s in &self.surfaces {
             let scale = render_scale(s.scale);
             for win in &s.scene.windows {
                 let Some(id) = win.toplevel.as_deref().filter(|id| !capture.started.contains(*id)) else {
                     continue;
                 };
-                let handle = if capture.jobs.len() < MAX_JOBS { capture.handle(id) } else { None };
-                // Tried again when its handle is announced, or when a capture ends.
-                match handle {
-                    Some(handle) => {
-                        capture.start(id, &handle, (win.rect.w * scale, win.rect.h * scale), &self.qh);
-                    }
-                    None => all_started = false,
+                // Tried again when its handle is announced.
+                if let Some(handle) = capture.handle(id) {
+                    capture.start(id, &handle, (win.rect.w * scale, win.rect.h * scale), &self.qh);
                 }
             }
-        }
-        if !capture.waiting || (all_started && capture.jobs.is_empty()) {
-            self.show_thumbs();
         }
     }
 
     fn end_capture(&mut self, id: &str, thumb: Option<Pixmap>) {
         if let Some(capture) = &mut self.capture {
             capture.jobs.remove(id);
-            if let Some(thumb) = thumb {
-                capture.ready.push(id.to_owned());
-                self.thumbs.insert(id.to_owned(), Thumb::new(thumb));
-                // Now, while still hidden, so the fade does not wait for it.
-                self.fit_thumbs();
-            }
         }
-        self.capture_windows();
+        if let Some(thumb) = thumb {
+            self.thumbs.insert(id.to_owned(), Thumb::new(thumb));
+            self.redraw_all();
+        }
     }
 
     pub(super) fn fit_thumbs(&mut self) {
@@ -253,30 +190,6 @@ impl App {
                 }
             }
         }
-    }
-
-    fn show_thumbs(&mut self) {
-        let Some(capture) = &mut self.capture else { return };
-        if capture.ready.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        capture.fading.extend(capture.ready.drain(..).map(|id| (id, now)));
-        self.redraw_all();
-    }
-
-    /// Brings the opacity of fading thumbnails up to date; true while any is still fading.
-    pub(super) fn step_fades(&mut self) -> bool {
-        let Some(capture) = &mut self.capture else { return false };
-        let now = Instant::now();
-        capture.fading.retain(|(id, start)| {
-            let t = (now - *start).as_secs_f32() / FADE.as_secs_f32();
-            if let Some(thumb) = self.thumbs.get_mut(id) {
-                thumb.opacity = t.min(1.0);
-            }
-            t < 1.0
-        });
-        !capture.fading.is_empty()
     }
 }
 
@@ -361,49 +274,66 @@ impl Dispatch2<ExtImageCopyCaptureFrameV1, App> for JobId {
     }
 }
 
-/// Converts shm pixels in a little-endian 32-bit `format` to a pixmap.
-fn to_pixmap(data: &[u8], w: u32, h: u32, format: wl_shm::Format) -> Option<Pixmap> {
+/// Captured pixels, `w`×`h` in a little-endian 32-bit shm `format`, as a
+/// pixmap shrunk near `target`, see `shrink`.
+fn thumbnail_of(data: &[u8], w: u32, h: u32, format: wl_shm::Format, target: (f32, f32)) -> Option<Pixmap> {
     // In memory, ARGB8888 is B, G, R, A and ABGR8888 is R, G, B, A.
-    let (bgr, opaque) = match format {
-        wl_shm::Format::Argb8888 => (true, false),
-        wl_shm::Format::Xrgb8888 => (true, true),
-        wl_shm::Format::Abgr8888 => (false, false),
-        wl_shm::Format::Xbgr8888 => (false, true),
-        _ => return None,
-    };
-    let mut rgba = Vec::with_capacity(data.len());
-    for &[p0, p1, p2, p3] in data.as_chunks::<4>().0 {
-        let (r, g, b) = if bgr { (p2, p1, p0) } else { (p0, p1, p2) };
-        let a = if opaque { 255 } else { p3 };
-        // Premultiplied, so no channel may exceed alpha; a bad client could break that.
-        rgba.extend_from_slice(&[r.min(a), g.min(a), b.min(a), a]);
+    match format {
+        wl_shm::Format::Argb8888 => shrink(data, w, h, target, |[b, g, r, a]| premultiplied(r, g, b, a)),
+        wl_shm::Format::Xrgb8888 => shrink(data, w, h, target, |[b, g, r, _]| [r, g, b, 255]),
+        wl_shm::Format::Abgr8888 => shrink(data, w, h, target, |[r, g, b, a]| premultiplied(r, g, b, a)),
+        wl_shm::Format::Xbgr8888 => shrink(data, w, h, target, |[r, g, b, _]| [r, g, b, 255]),
+        _ => None,
     }
-    Pixmap::from_vec(rgba, IntSize::from_wh(w, h)?)
 }
 
-/// Halves `pix` for as long as it still covers `target`, so drawing it
-/// reduces it at most 2×, which the draw-time filter handles well.
-fn shrink(mut pix: Pixmap, (tw, th): (f32, f32)) -> Pixmap {
-    while pix.width() as f32 / 2.0 >= tw.max(1.0) && pix.height() as f32 / 2.0 >= th.max(1.0) {
-        let Some(half) = halve(&pix) else { break };
+/// No channel may exceed alpha; a bad client could break that.
+fn premultiplied(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
+    [r.min(a), g.min(a), b.min(a), a]
+}
+
+/// Converts `w`×`h` pixels with `px` into a pixmap, halving it for as long as
+/// it still covers `target`, so fitting it to its box reduces it at most 2×,
+/// which bilinear filtering handles well. The first halving converts as it
+/// goes, sparing a full-size copy.
+fn shrink(
+    data: &[u8],
+    w: u32,
+    h: u32,
+    (tw, th): (f32, f32),
+    px: impl Fn([u8; 4]) -> [u8; 4],
+) -> Option<Pixmap> {
+    if data.len() != w as usize * h as usize * 4 {
+        return None;
+    }
+    let halvable = |w: u32, h: u32| w as f32 / 2.0 >= tw.max(1.0) && h as f32 / 2.0 >= th.max(1.0);
+    if !halvable(w, h) {
+        let rgba = data.as_chunks::<4>().0.iter().flat_map(|p| px(*p)).collect();
+        return Pixmap::from_vec(rgba, IntSize::from_wh(w, h)?);
+    }
+    let mut pix = halve(data, w, h, px)?;
+    while halvable(pix.width(), pix.height()) {
+        let Some(half) = halve(pix.data(), pix.width(), pix.height(), |p| p) else { break };
         pix = half;
     }
-    pix
+    Some(pix)
 }
 
-/// Averages each 2×2 block into one pixel; an odd last row or column is dropped.
-fn halve(pix: &Pixmap) -> Option<Pixmap> {
-    let (w, h) = (pix.width() as usize / 2, pix.height() as usize / 2);
-    let mut out = Pixmap::new(w as u32, h as u32)?;
-    let (src, stride) = (pix.data(), pix.width() as usize * 4);
-    let dst = out.data_mut();
-    for y in 0..h {
-        for x in 0..w {
+/// Averages each 2×2 block of `w`×`h` pixels, converted with `px`, into one;
+/// an odd last row or column is dropped.
+fn halve(src: &[u8], w: u32, h: u32, px: impl Fn([u8; 4]) -> [u8; 4]) -> Option<Pixmap> {
+    let (w, h) = (w as usize, h as usize);
+    let mut out = Pixmap::new((w / 2) as u32, (h / 2) as u32)?;
+    let rows = out.data_mut().chunks_exact_mut(w / 2 * 4);
+    for (row, pair) in rows.zip(src.chunks_exact(w * 8)) {
+        let (top, bottom) = pair.split_at(w * 4);
+        let top = top.as_chunks::<4>().0.as_chunks::<2>().0;
+        let bottom = bottom.as_chunks::<4>().0.as_chunks::<2>().0;
+        for ((d, &[t0, t1]), &[b0, b1]) in row.as_chunks_mut::<4>().0.iter_mut().zip(top).zip(bottom) {
+            let [t0, t1, b0, b1] = [px(t0), px(t1), px(b0), px(b1)];
             for c in 0..4 {
-                let i = 2 * y * stride + 8 * x + c;
-                let sum: u16 =
-                    [i, i + 4, i + stride, i + stride + 4].iter().map(|&j| u16::from(src[j])).sum();
-                dst[(y * w + x) * 4 + c] = ((sum + 2) / 4) as u8;
+                let sum = u16::from(t0[c]) + u16::from(t1[c]) + u16::from(b0[c]) + u16::from(b1[c]);
+                d[c] = ((sum + 2) / 4) as u8;
             }
         }
     }
@@ -416,37 +346,41 @@ mod tests {
 
     #[test]
     fn pixel_formats() {
+        let one = |data: [u8; 4], format| thumbnail_of(&data, 1, 1, format, (1.0, 1.0)).unwrap();
         // One translucent red pixel, premultiplied: R=0x80, A=0x80.
-        let argb = to_pixmap(&[0x00, 0x00, 0x80, 0x80], 1, 1, wl_shm::Format::Argb8888).unwrap();
+        let argb = one([0x00, 0x00, 0x80, 0x80], wl_shm::Format::Argb8888);
         assert_eq!(argb.data(), [0x80, 0x00, 0x00, 0x80]);
-        let abgr = to_pixmap(&[0x80, 0x00, 0x00, 0x80], 1, 1, wl_shm::Format::Abgr8888).unwrap();
-        assert_eq!(abgr.data(), argb.data());
+        assert_eq!(one([0x80, 0x00, 0x00, 0x80], wl_shm::Format::Abgr8888).data(), argb.data());
         // X formats ignore the fourth byte.
-        let xrgb = to_pixmap(&[0x10, 0x20, 0x30, 0x00], 1, 1, wl_shm::Format::Xrgb8888).unwrap();
-        assert_eq!(xrgb.data(), [0x30, 0x20, 0x10, 0xff]);
+        assert_eq!(one([0x10, 0x20, 0x30, 0x00], wl_shm::Format::Xrgb8888).data(), [0x30, 0x20, 0x10, 0xff]);
         // Colors brighter than alpha are clamped to stay premultiplied.
-        let bad = to_pixmap(&[0xff, 0xff, 0xff, 0x40], 1, 1, wl_shm::Format::Argb8888).unwrap();
-        assert_eq!(bad.data(), [0x40, 0x40, 0x40, 0x40]);
-        assert!(to_pixmap(&[0; 4], 1, 1, wl_shm::Format::Rgb565).is_none());
-        assert!(to_pixmap(&[0; 4], 2, 1, wl_shm::Format::Argb8888).is_none());
+        assert_eq!(one([0xff, 0xff, 0xff, 0x40], wl_shm::Format::Argb8888).data(), [0x40; 4]);
+        assert!(thumbnail_of(&[0; 4], 1, 1, wl_shm::Format::Rgb565, (1.0, 1.0)).is_none());
+        assert!(thumbnail_of(&[0; 4], 2, 1, wl_shm::Format::Argb8888, (1.0, 1.0)).is_none());
     }
 
     #[test]
     fn halving_averages_blocks() {
-        let mut pix = Pixmap::new(3, 2).unwrap();
         // Left 2×2 block: two white and two black opaque pixels; the third column is dropped.
-        for (i, v) in [255u8, 0, 99, 0, 255, 99].into_iter().enumerate() {
-            pix.data_mut()[i * 4..i * 4 + 4].copy_from_slice(&[v, v, v, 255]);
-        }
-        let half = halve(&pix).unwrap();
+        let src: Vec<u8> = [255u8, 0, 99, 0, 255, 99].into_iter().flat_map(|v| [v, v, v, 255]).collect();
+        let half = halve(&src, 3, 2, |p| p).unwrap();
         assert_eq!((half.width(), half.height()), (1, 1));
         assert_eq!(half.data(), [128, 128, 128, 255]);
     }
 
     #[test]
+    fn first_halving_converts() {
+        // 2×2 XRGB, opaque: blue 0x40 and 0x80, in memory B, G, R, X.
+        let data = [0x40, 0, 0, 0, 0x80, 0, 0, 0, 0x40, 0, 0, 0, 0x80, 0, 0, 0];
+        let half = thumbnail_of(&data, 2, 2, wl_shm::Format::Xrgb8888, (1.0, 1.0)).unwrap();
+        assert_eq!(half.data(), [0, 0, 0x60, 0xff]);
+    }
+
+    #[test]
     fn shrinks_while_covering_the_target() {
-        let size = |w, h, target| {
-            let p = shrink(Pixmap::new(w, h).unwrap(), target);
+        let size = |w: u32, h: u32, target| {
+            let data = vec![0; w as usize * h as usize * 4];
+            let p = shrink(&data, w, h, target, |p| p).unwrap();
             (p.width(), p.height())
         };
         assert_eq!(size(1920, 1080, (200.0, 100.0)), (240, 135));

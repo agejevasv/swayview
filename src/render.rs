@@ -60,14 +60,11 @@ pub struct Thumb {
     source: Pixmap,
     /// `source` made to fit its window's box, see `fit`.
     fitted: Option<Pixmap>,
-    /// From 0, hidden, to 1, while fading in.
-    pub opacity: f32,
 }
 
 impl Thumb {
-    /// A hidden thumbnail of `source`.
     pub fn new(source: Pixmap) -> Self {
-        Thumb { source, fitted: None, opacity: 0.0 }
+        Thumb { source, fitted: None }
     }
 
     /// Scales the thumbnail for a window drawn in `r` at `scale`, unless it
@@ -164,17 +161,13 @@ impl Renderer {
             let second = second.filter(|_| inner.h >= app.line_height() + title.line_height());
             let text_h = app.line_height() + second.as_ref().map_or(0.0, |_| title.line_height());
 
-            let thumb = win.toplevel.as_ref().and_then(|id| view.thumbs.get(id)).filter(|t| t.opacity > 0.0);
+            let thumb = win.toplevel.as_ref().and_then(|id| view.thumbs.get(id));
             let (x, y, w, h) = snap(win.rect, scale);
             // Left out if not fitted to this size; `Thumb::fit` is the caller's job.
-            if let Some(thumb) = thumb
-                && let Some(fitted) = thumb.fitted_to(w, h)
-            {
-                let paint = PixmapPaint { opacity: thumb.opacity, ..PixmapPaint::default() };
-                pix.draw_pixmap(x, y, fitted.as_ref(), &paint, Transform::identity(), None);
+            if let Some(fitted) = thumb.and_then(|t| t.fitted_to(w, h)) {
+                pix.draw_pixmap(x, y, fitted.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 if selected {
-                    let tint =
-                        class.background.fade((thumb.opacity * f32::from(SELECTED_TINT)).round() as u8);
+                    let tint = class.background.fade(SELECTED_TINT);
                     fill(&mut pix, win.rect, (THUMB_RADIUS, THUMB_RADIUS), tint, t);
                 }
                 if has_text {
@@ -182,8 +175,7 @@ impl Renderer {
                     let shade = Rect::new(r.x, r.y, r.w, (text_h + 2.0 * PAD).min(r.h));
                     // Square bottom corners, unless the shade covers the whole window.
                     let bottom = if shade.h < r.h { 0.0 } else { THUMB_RADIUS };
-                    let color = SHADE.fade((thumb.opacity * 255.0).round() as u8);
-                    fill(&mut pix, shade, (THUMB_RADIUS, bottom), color, t);
+                    fill(&mut pix, shade, (THUMB_RADIUS, bottom), SHADE, t);
                 }
             }
             stroke(&mut pix, win.rect, rounded, border, width, t);
@@ -313,7 +305,7 @@ fn fill_cover(pix: &mut Pixmap, source: &Pixmap, radius: f32) {
     let s = (r.w / sw).max(r.h / sh);
     let placed = Transform::from_row(s, 0.0, 0.0, s, r.x + (r.w - sw * s) / 2.0, r.y + (r.h - sh * s) / 2.0);
     let paint = Paint {
-        shader: Pattern::new(source.as_ref(), SpreadMode::Pad, FilterQuality::Bicubic, 1.0, placed),
+        shader: Pattern::new(source.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, 1.0, placed),
         anti_alias: true,
         ..Paint::default()
     };
@@ -363,7 +355,7 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
 
     /// The fixture's first window with a solid red thumbnail, fitted at `fit_scale`.
-    fn scene_with_thumb(fit_scale: Option<f32>, opacity: f32) -> (Scene, Thumbs) {
+    fn scene_with_thumb(fit_scale: Option<f32>) -> (Scene, Thumbs) {
         let mut scene = crate::layout::build(&crate::model::tests::tree().outputs[0], 800.0, 450.0);
         scene.windows[0].toplevel = Some("a".into());
         let mut source = Pixmap::new(40, 30).unwrap();
@@ -372,7 +364,6 @@ mod tests {
         if let Some(scale) = fit_scale {
             thumb.fit(scene.windows[0].rect, scale);
         }
-        thumb.opacity = opacity;
         (scene, Thumbs::from([("a".into(), thumb)]))
     }
 
@@ -394,24 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_drawn_only_when_visible_and_fitted() {
-        let (scene, _) = scene_with_thumb(None, 0.0);
+    fn thumbnail_drawn_only_when_fitted() {
+        let (scene, _) = scene_with_thumb(None);
         let plain = render(&scene, &Thumbs::new(), None, 1.0);
         let at = below_text(&scene, 1.0);
         assert_ne!(rgba(&plain, at), RED);
 
-        let (scene, thumbs) = scene_with_thumb(Some(1.0), 1.0);
+        let (scene, thumbs) = scene_with_thumb(Some(1.0));
         assert_eq!(rgba(&render(&scene, &thumbs, None, 1.0), at), RED);
-        // Hidden before its fade, not fitted, or fitted for another scale: a plain box.
-        for (fit, opacity) in [(Some(1.0), 0.0), (None, 1.0), (Some(2.0), 1.0)] {
-            let (scene, thumbs) = scene_with_thumb(fit, opacity);
-            assert_eq!(render(&scene, &thumbs, None, 1.0).data(), plain.data(), "{fit:?} {opacity}");
+        // Not fitted, or fitted for another scale: a plain box.
+        for fit in [None, Some(2.0)] {
+            let (scene, thumbs) = scene_with_thumb(fit);
+            assert_eq!(render(&scene, &thumbs, None, 1.0).data(), plain.data(), "{fit:?}");
         }
     }
 
     #[test]
     fn selected_thumbnail_is_tinted() {
-        let (scene, thumbs) = scene_with_thumb(Some(1.0), 1.0);
+        let (scene, thumbs) = scene_with_thumb(Some(1.0));
         let tinted = rgba(&render(&scene, &thumbs, Some(0), 1.0), below_text(&scene, 1.0));
         assert_ne!(tinted, RED);
         assert!(tinted[0] > tinted[1] && tinted[0] > tinted[2], "still mostly red: {tinted:?}");
@@ -420,7 +411,7 @@ mod tests {
     #[test]
     fn thumbnail_stays_inside_the_border_corners() {
         for (selected, scale) in [(None, 1.0), (None, 2.0), (Some(0), 1.5), (Some(0), 2.0)] {
-            let (scene, thumbs) = scene_with_thumb(Some(scale), 1.0);
+            let (scene, thumbs) = scene_with_thumb(Some(scale));
             let with = render(&scene, &thumbs, selected, scale);
             let without = render(&scene, &Thumbs::new(), selected, scale);
             let (x, y, w, h) = snap(scene.windows[0].rect, scale);

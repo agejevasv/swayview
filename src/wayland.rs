@@ -116,7 +116,6 @@ pub fn run() -> Result<()> {
     let (globals, mut queue) = registry_queue_init(&conn)?;
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
     let mut app = App::new(&globals, &queue.handle(), event_loop.handle())?;
-    app.limit_capture_wait();
     // Learn output names and positions before creating surfaces.
     queue.roundtrip(&mut app)?;
     app.create_surfaces();
@@ -335,7 +334,6 @@ impl App {
 
     fn draw(&mut self, i: usize) {
         self.fit_thumbs();
-        let fading = self.step_fades();
         let s = &mut self.surfaces[i];
         let Some((w, h)) = s.size else { return };
         let (scale, (pw, ph)) = buffer_size((w, h), s.scale);
@@ -369,8 +367,7 @@ impl App {
             return warn(format_args!("attach: {e}"));
         }
         s.layer.commit();
-        // Keeps drawing, one frame per frame callback, until the fade is done.
-        s.dirty = fading;
+        s.dirty = false;
         s.frame_pending = true;
     }
 
