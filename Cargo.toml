@@ -1,6 +1,6 @@
 [package]
 name = "swayview"
-version = "0.1.0"
+version = "0.1.1"
 description = "Live workspace overview for sway"
 license.workspace = true
 repository.workspace = true
