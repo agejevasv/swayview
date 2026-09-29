@@ -71,7 +71,6 @@ struct Surf {
     viewport: Option<WpViewport>,
     _fractional_scale: Option<WpFractionalScaleV1>,
     scene: Scene,
-    /// Needs a redraw.
     dirty: bool,
     /// A frame callback is outstanding; draw when it arrives.
     frame_pending: bool,

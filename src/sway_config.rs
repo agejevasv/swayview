@@ -34,7 +34,6 @@ impl Default for Clients {
     }
 }
 
-/// Colors from the sway config at `path`, or sway's defaults.
 pub fn load(path: Option<&Path>) -> Clients {
     let mut parser = Parser { clients: Clients::default(), vars: Vec::new(), loaded: HashSet::new() };
     if let Some(path) = path {

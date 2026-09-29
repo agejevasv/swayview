@@ -55,7 +55,6 @@ pub fn click(scene: &Scene, x: f32, y: f32) -> Action {
     scene.hit(x, y).map_or(Action::Close, |w| Action::Focus(scene.windows[w].id))
 }
 
-/// Moving the pointer over a window selects it.
 pub fn motion(scene: &Scene, surface: usize, x: f32, y: f32) -> Action {
     scene.hit(x, y).map_or(Action::Nothing, |window| Action::Select(Sel { surface, window }))
 }
@@ -68,7 +67,6 @@ pub fn focused(scenes: &[&Scene]) -> Option<Sel> {
         .find_map(|(surface, s)| s.focused_window().map(|window| Sel { surface, window }))
 }
 
-/// Where window `id` is shown, if anywhere.
 pub fn find(scenes: &[&Scene], id: ConId) -> Option<Sel> {
     scenes
         .iter()

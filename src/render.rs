@@ -17,7 +17,6 @@ const TITLE_FADE: u8 = 0xb0;
 
 const PAD: f32 = 6.0;
 const LINE_HEIGHT: f32 = 1.3;
-/// Narrower windows get no text.
 const MIN_TEXT_WIDTH: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -28,7 +27,6 @@ struct TextStyle {
 }
 
 impl TextStyle {
-    /// White until given a color with `color`.
     const fn new(size: f32, bold: bool) -> Self {
         TextStyle { size, bold, color: Rgba(0xffffffff) }
     }
@@ -51,7 +49,6 @@ const OUTPUT_LABEL: TextStyle = TextStyle::new(13.0, false);
 pub struct View {
     /// The selected window, if it is on this scene.
     pub selected: Option<usize>,
-    /// The workspace marked as holding the selection.
     pub selected_workspace: Option<usize>,
 }
 
@@ -96,7 +93,6 @@ impl Renderer {
 
         for (i, win) in scene.windows.iter().enumerate() {
             let selected = view.selected == Some(i);
-            // The selection starts on sway's focused window.
             let class = if selected {
                 theme.window.selected
             } else if win.urgent {

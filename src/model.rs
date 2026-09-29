@@ -115,7 +115,6 @@ pub struct Window {
     /// The fullscreen container the window is in, or is.
     pub fullscreen: Option<Fullscreen>,
     pub sticky: bool,
-    /// Asks for attention.
     pub urgent: bool,
     pub focused: bool,
 }
@@ -227,7 +226,6 @@ impl Tree {
         local.or_else(global).map(|f| f.id)
     }
 
-    /// The output holding the focused workspace.
     pub fn focused_output(&self) -> Option<&Output> {
         self.outputs.iter().find(|o| o.workspaces.iter().any(|w| w.focused))
     }

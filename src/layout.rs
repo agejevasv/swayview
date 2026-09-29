@@ -37,7 +37,6 @@ pub struct WinItem {
 pub struct Scene {
     /// Name of the sway output this scene is shown on, e.g. `eDP-1`.
     pub output_name: String,
-    /// Where the output name is drawn.
     pub output_label: Rect,
     /// The sway output this scene is shown on, in global layout coordinates.
     pub output: Rect,
@@ -87,7 +86,6 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
     if n == 0 || rect.is_empty() {
         return scene;
     }
-    // The grid goes below the name strip.
     let (y0, h) = (OUTPUT_BAR, (h - OUTPUT_BAR).max(1.0));
     // Workspace boxes are miniatures of the output.
     let aspect = rect.w / rect.h;
