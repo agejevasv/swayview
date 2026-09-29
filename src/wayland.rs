@@ -528,10 +528,11 @@ impl SeatHandler for App {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard
-            && let Some(k) = self.keyboard.take()
-        {
-            k.release();
+        // The keyboard is not released: destroying it drops its key repeat
+        // timer from inside the event loop's dispatch, which calloop panics on.
+        // The dead object lives until exit.
+        if capability == Capability::Keyboard {
+            self.keyboard = None;
         }
         if capability == Capability::Pointer
             && let Some(p) = self.pointer.take()
