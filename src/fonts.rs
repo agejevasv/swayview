@@ -6,7 +6,7 @@
 //! chain (`fc-match -s`), which keeps coverage for other scripts and emoji in
 //! window titles. Without `fc-match`, it falls back to the full scan.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::process::Command;
 use std::thread;
 
@@ -25,35 +25,41 @@ fn fontconfig<const N: usize>(faces: [(&str, bool); N]) -> Option<(FontSystem, [
         let join = |h: thread::ScopedJoinHandle<'_, Option<String>>| h.join().ok().flatten();
         let matches = faces.map(|(family, bold)| {
             let pattern = format!("{}{}", escape(family), if bold { ":bold" } else { "" });
-            s.spawn(move || fc_match(&["-f", "%{family[0]}\n%{file}\n", &pattern]))
+            s.spawn(move || fc_match(&["-f", "%{family}\n%{index}\n%{file}\n", &pattern]))
         });
         let fallback = s.spawn(|| fc_match(&["-s", "-f", "%{file}\n", "sans-serif"]));
         (matches.map(join), join(fallback))
     });
 
-    let mut names = Vec::with_capacity(N);
-    let mut files = Vec::new();
-    for ((family, _), m) in faces.iter().zip(&matches) {
-        let (name, file) = m.as_deref()?.split_once('\n')?;
-        if name.is_empty() {
-            return None;
-        }
-        // fontconfig always picks something, so a typo would go unnoticed.
-        if !["sans-serif", "serif", "monospace"].contains(family) && !name.eq_ignore_ascii_case(family) {
-            warn(format_args!("font {family:?} not found, using {name:?}"));
-        }
-        names.push(name.to_string());
-        files.push(file.trim_end());
-    }
-    files.extend(fallback.as_deref().unwrap_or("").lines());
-
     let mut db = fontdb::Database::new();
-    let mut seen = HashSet::new();
-    for file in files {
-        if !file.is_empty() && seen.insert(file) {
-            // An unreadable font only costs its coverage.
-            let _ = db.load_font_file(file);
+    let mut loaded = HashMap::new();
+    // An unreadable font only costs its coverage.
+    let mut load = |db: &mut fontdb::Database, file: &str| {
+        loaded
+            .entry(file.to_string())
+            .or_insert_with(|| db.load_font_source(fontdb::Source::File(file.into())))
+            .clone()
+    };
+
+    let mut names = Vec::with_capacity(N);
+    for ((family, _), m) in faces.iter().zip(&matches) {
+        let mut lines = m.as_deref()?.lines();
+        let (families, index, file) = (lines.next()?, lines.next()?.parse::<u32>().ok()?, lines.next()?);
+        let first = families.split(',').next().filter(|f| !f.is_empty())?;
+        // fontconfig always picks something, so a typo would go unnoticed.
+        let generic = ["sans-serif", "serif", "monospace"].contains(family);
+        if !generic && !families.split(',').any(|f| f.eq_ignore_ascii_case(family)) {
+            warn(format_args!("font {family:?} not found, using {first:?}"));
         }
+        // Text is matched by the family name fontdb reads from the file, which
+        // is not always the one fontconfig lists first (e.g. with Nerd Fonts).
+        // The low 16 bits of fontconfig's index are the face in a collection.
+        let ids = load(&mut db, file);
+        let face = ids.iter().filter_map(|id| db.face(*id)).find(|f| f.index == index & 0xffff);
+        names.push(face.and_then(|f| f.families.first()).map_or(first, |(name, _)| name).to_string());
+    }
+    for file in fallback.as_deref().unwrap_or("").lines().filter(|f| !f.is_empty()) {
+        load(&mut db, file);
     }
     if db.is_empty() {
         return None;
