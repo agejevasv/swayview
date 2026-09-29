@@ -2,7 +2,7 @@
 //! commands. Pure, no Wayland.
 
 use crate::layout::{Dir, Scene};
-use crate::model::{ConId, Tree};
+use crate::model::{ConId, Rect, Tree};
 
 /// A window on one of the overview's surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +110,7 @@ fn step(scenes: &[&Scene], sel: Sel, dir: Dir) -> Option<Sel> {
     let surface = scenes
         .iter()
         .enumerate()
-        .filter(|(i, s)| *i != sel.surface && !s.windows.is_empty())
+        .filter(|(i, s)| *i != sel.surface && !s.windows.is_empty() && beyond(scene.output, s.output, dir))
         .filter_map(|(i, s)| Some((i, dir.cost(origin, s.output.center())?)))
         .min_by(|a, b| a.1.total_cmp(&b.1))?
         .0;
@@ -130,6 +130,17 @@ fn step(scenes: &[&Scene], sel: Sel, dir: Dir) -> Option<Sel> {
     };
     let window = (0..target.windows.len()).min_by(|&a, &b| score(a).total_cmp(&score(b)))?;
     Some(Sel { surface, window })
+}
+
+/// Whether `other` lies entirely past the `dir` edge of `from`, as for sway's
+/// `focus output`: a display beside this one is never up or down from it.
+fn beyond(from: Rect, other: Rect, dir: Dir) -> bool {
+    match dir {
+        Dir::Left => other.x + other.w <= from.x,
+        Dir::Right => other.x >= from.x + from.w,
+        Dir::Up => other.y + other.h <= from.y,
+        Dir::Down => other.y >= from.y + from.h,
+    }
 }
 
 /// The sway command for `action`, or `None` if it needs none.
@@ -167,14 +178,28 @@ mod tests {
 
     /// The fixture's output, and a copy of it placed to its right.
     fn two_scenes() -> (Scene, Scene) {
+        two_scenes_at(1920.0, 0.0)
+    }
+
+    /// The fixture's output, and a copy of it moved by (`dx`, `dy`).
+    fn two_scenes_at(dx: f32, dy: f32) -> (Scene, Scene) {
         let t = tree();
-        let left = t.outputs[0].clone();
-        let mut right = left.clone();
-        right.rect.x += left.rect.w;
-        for w in right.workspaces.iter_mut().flat_map(|ws| &mut ws.windows) {
-            w.rect.x += left.rect.w;
+        let first = t.outputs[0].clone();
+        let mut second = first.clone();
+        (second.rect.x, second.rect.y) = (second.rect.x + dx, second.rect.y + dy);
+        for w in second.workspaces.iter_mut().flat_map(|ws| &mut ws.windows) {
+            (w.rect.x, w.rect.y) = (w.rect.x + dx, w.rect.y + dy);
         }
-        (build(&left, 1920.0, 1080.0), build(&right, 1920.0, 1080.0))
+        (build(&first, 1920.0, 1080.0), build(&second, 1920.0, 1080.0))
+    }
+
+    /// Whether arrow `dir` from any window of the first scene moves to the second.
+    fn crosses(a: &Scene, b: &Scene, dir: Dir) -> bool {
+        let scenes = [a, b];
+        (0..a.windows.len()).any(|window| {
+            let sel = Sel { surface: 0, window };
+            matches!(key(&scenes, Some(sel), Key::Arrow(dir)), Action::Select(s) if s.surface == 1)
+        })
     }
 
     fn index(s: &Scene, title: &str) -> usize {
@@ -230,6 +255,18 @@ mod tests {
         // Nothing to the left of the left output.
         let foot = Sel { surface: 0, window: 0 };
         assert_eq!(key(&scenes, Some(foot), Key::Arrow(Dir::Left)), Action::Nothing);
+    }
+
+    #[test]
+    fn arrows_cross_only_toward_the_other_output() {
+        // Side by side, the right one a bit lower: only right crosses.
+        let (a, b) = two_scenes_at(1920.0, 200.0);
+        assert!(crosses(&a, &b, Dir::Right));
+        assert!(!crosses(&a, &b, Dir::Down) && !crosses(&a, &b, Dir::Up) && !crosses(&a, &b, Dir::Left));
+        // Stacked, the lower one a bit to the right: only down crosses.
+        let (a, b) = two_scenes_at(300.0, 1080.0);
+        assert!(crosses(&a, &b, Dir::Down));
+        assert!(!crosses(&a, &b, Dir::Right) && !crosses(&a, &b, Dir::Left) && !crosses(&a, &b, Dir::Up));
     }
 
     #[test]
