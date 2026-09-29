@@ -1,4 +1,4 @@
-//! The fonts and colors swayview draws with.
+//! The fonts, colors and thumbnail setting swayview draws with.
 //!
 //! Window colors default to sway's `client.*` colors, everything else to
 //! built-in values. Anything set in `$XDG_CONFIG_HOME/swayview/config.yaml`
@@ -49,6 +49,8 @@ pub struct WindowColors {
 pub struct Config {
     pub fonts: Fonts,
     pub colors: Colors,
+    /// Show windows' contents where sway can capture them.
+    pub thumbnails: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,7 +83,11 @@ pub struct Colors {
 impl Config {
     fn defaults(clients: sway_config::Clients) -> Config {
         let font = |size| Font { family: "sans-serif".into(), size };
-        Config { fonts: Fonts { app: font(14.0), title: font(12.0) }, colors: Colors::defaults(clients) }
+        Config {
+            fonts: Fonts { app: font(14.0), title: font(12.0) },
+            colors: Colors::defaults(clients),
+            thumbnails: true,
+        }
     }
 
     /// Defaults from the sway config at `sway_config`, overridden by
@@ -102,6 +108,7 @@ impl Config {
                         f.fonts.app.apply(&mut config.fonts.app);
                         f.fonts.title.apply(&mut config.fonts.title);
                         config.colors.apply(f.colors);
+                        config.thumbnails = f.thumbnails.unwrap_or(config.thumbnails);
                     }
                     Err(e) => warn(format_args!("{}: {e}", path.display())),
                 },
@@ -174,6 +181,7 @@ struct ConfigFile {
     fonts: FontsFile,
     #[serde(default)]
     colors: ColorsFile,
+    thumbnails: Option<bool>,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -340,6 +348,7 @@ colors:
         let d = defaults();
         assert_eq!(c.fonts.title, Font { family: "Inter".into(), size: d.fonts.title.size });
         assert_eq!(c.fonts.app, d.fonts.app);
+        assert!(c.thumbnails);
         let (c, d) = (c.colors, d.colors);
         assert_eq!(c.backdrop, Rgba(0x000000cc));
         assert_eq!(c.workspace.selected, Rgba(0x00ffffff));
@@ -347,6 +356,11 @@ colors:
         assert_eq!(c.window.selected.background, Rgba(0x123456ff));
         assert_eq!(c.window.selected.text, d.window.selected.text);
         assert_eq!(c.window.normal, d.window.normal);
+    }
+
+    #[test]
+    fn thumbnails_can_be_turned_off() {
+        assert!(!with_file("thumbnails", "thumbnails: false\n").thumbnails);
     }
 
     #[test]

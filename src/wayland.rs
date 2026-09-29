@@ -5,6 +5,8 @@
 //! rendered at its output's scale, fractional where the compositor supports
 //! `wp_fractional_scale_v1` and `wp_viewporter`, integer otherwise.
 
+mod capture;
+
 use anyhow::{Context, Result, ensure};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -51,9 +53,10 @@ use crate::config::Config;
 use crate::input::{self, Action, Key, Sel};
 use crate::layout::{self, Dir, Scene};
 use crate::model::{Focus, Tree};
-use crate::render::{Renderer, View};
+use crate::render::{Renderer, Thumbs, View};
 use crate::sway::Ipc;
 use crate::warn;
+use capture::Capture;
 
 const BTN_LEFT: u32 = 0x110;
 /// The fractional-scale protocol counts scale in 120ths: 120 is 1×, 180 is 1.5×.
@@ -90,6 +93,9 @@ struct App {
     /// For the key repeat timer.
     loop_handle: LoopHandle<'static, App>,
     renderer: Renderer,
+    /// Present when thumbnails are on and the compositor can capture windows.
+    capture: Option<Capture>,
+    thumbs: Thumbs,
     ipc: Ipc,
     tree: Tree,
     initial_focus: Option<Focus>,
@@ -110,6 +116,7 @@ pub fn run() -> Result<()> {
     let (globals, mut queue) = registry_queue_init(&conn)?;
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
     let mut app = App::new(&globals, &queue.handle(), event_loop.handle())?;
+    app.limit_capture_wait();
     // Learn output names and positions before creating surfaces.
     queue.roundtrip(&mut app)?;
     app.create_surfaces();
@@ -161,10 +168,15 @@ fn sway_output_name(info: &OutputInfo, tree: &Tree) -> Option<String> {
     tree.outputs.iter().find(|o| (o.rect.x as i32, o.rect.y as i32) == pos).map(|o| o.name.clone())
 }
 
+/// Physical pixels per logical pixel at `scale` `SCALE_UNIT`s.
+fn render_scale(scale: u32) -> f32 {
+    scale.max(1) as f32 / SCALE_UNIT as f32
+}
+
 /// Render scale and buffer size for a logical size at `scale` `SCALE_UNIT`s,
 /// rounded half away from zero as `wp_fractional_scale_v1` specifies.
 fn buffer_size((w, h): (u32, u32), scale: u32) -> (f32, (u32, u32)) {
-    let f = scale.max(1) as f32 / SCALE_UNIT as f32;
+    let f = render_scale(scale);
     (f, ((w as f32 * f).round() as u32, (h as f32 * f).round() as u32))
 }
 
@@ -196,6 +208,7 @@ impl App {
         let mut ipc = Ipc::connect()?;
         let tree = ipc.get_tree()?;
         let config = Config::load(ipc.config_path().ok().as_deref());
+        let capture = if config.thumbnails { Capture::new(globals, qh) } else { None };
         let shm = Shm::bind(globals, qh).context("wl_shm")?;
         Ok(App {
             registry_state: RegistryState::new(globals),
@@ -212,6 +225,8 @@ impl App {
             qh: qh.clone(),
             loop_handle,
             renderer: Renderer::new(config),
+            capture,
+            thumbs: Thumbs::new(),
             ipc,
             initial_focus: tree.focus(),
             tree,
@@ -284,6 +299,7 @@ impl App {
         self.selected =
             selected_id.and_then(|id| input::find(&scenes, id)).or_else(|| input::focused(&scenes));
         self.redraw_all();
+        self.capture_windows();
     }
 
     fn refresh(&mut self) {
@@ -318,6 +334,8 @@ impl App {
     }
 
     fn draw(&mut self, i: usize) {
+        self.fit_thumbs();
+        let fading = self.step_fades();
         let s = &mut self.surfaces[i];
         let Some((w, h)) = s.size else { return };
         let (scale, (pw, ph)) = buffer_size((w, h), s.scale);
@@ -327,7 +345,7 @@ impl App {
             Some(_) => selected.map(|w| s.scene.windows[w].workspace),
             None => s.scene.selected_workspace(None),
         };
-        let view = View { selected, selected_workspace };
+        let view = View { selected, selected_workspace, thumbs: &self.thumbs };
         let Some(pix) = self.renderer.draw(&s.scene, &view, pw, ph, scale) else { return };
 
         let (buffer, canvas) =
@@ -351,7 +369,8 @@ impl App {
             return warn(format_args!("attach: {e}"));
         }
         s.layer.commit();
-        s.dirty = false;
+        // Keeps drawing, one frame per frame callback, until the fade is done.
+        s.dirty = fading;
         s.frame_pending = true;
     }
 

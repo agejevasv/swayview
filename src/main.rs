@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::Config;
 use crate::model::Tree;
-use crate::render::{Renderer, View};
+use crate::render::{Renderer, Thumbs, View};
 
 const USAGE: &str = "\
 usage: swayview
@@ -84,7 +84,8 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
     let (w, h) = args.size.unwrap_or((output.rect.w as u32, output.rect.h as u32));
     let scene = layout::build(output, w as f32, h as f32);
     let selected = scene.focused_window();
-    let view = View { selected, selected_workspace: scene.selected_workspace(selected) };
+    let thumbs = Thumbs::new();
+    let view = View { selected, selected_workspace: scene.selected_workspace(selected), thumbs: &thumbs };
     let pix = Renderer::new(config).draw(&scene, &view, w, h, 1.0).context("image size is zero")?;
     pix.save_png(out).with_context(|| format!("writing {out}"))?;
     Ok(())

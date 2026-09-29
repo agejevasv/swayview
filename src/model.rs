@@ -117,6 +117,8 @@ pub struct Window {
     pub sticky: bool,
     pub urgent: bool,
     pub focused: bool,
+    /// Its `ext_foreign_toplevel_list_v1` identifier; sway 1.11 and later.
+    pub toplevel: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,6 +294,7 @@ impl Collector {
                 sticky: node.sticky,
                 urgent: node.urgent,
                 focused: node.focused,
+                toplevel: node.foreign_toplevel_identifier.clone(),
             });
             return;
         }
@@ -394,6 +397,7 @@ struct Node {
     #[serde(default)]
     layout: Layout,
     app_id: Option<String>,
+    foreign_toplevel_identifier: Option<String>,
     window_properties: Option<WindowProperties>,
     num: Option<i32>,
     /// 0 none, 1 workspace, 2 global.
@@ -624,6 +628,7 @@ pub(crate) mod tests {
             floating_nodes: Vec::new(),
             layout: Layout::Other,
             app_id: None,
+            foreign_toplevel_identifier: None,
             window_properties: None,
             num: None,
             fullscreen_mode,
@@ -645,11 +650,17 @@ pub(crate) mod tests {
               "rect":{"x":0,"y":0,"width":10,"height":10},
               "nodes":[{"id":3,"name":"1","num":1,"type":"workspace","rect":{"x":0,"y":0,"width":10,"height":10},
                 "nodes":[{"id":4,"name":"t","type":"future_type","app_id":"a","fullscreen_mode":2,
-                  "urgent":true,"sticky":true,
+                  "urgent":true,"sticky":true,"foreign_toplevel_identifier":"4756f54d",
                   "rect":{"x":0,"y":0,"width":5,"height":5}}]}]}]}"#;
         let t = Tree::from_json(json).unwrap();
         let w = &t.outputs[0].workspaces[0].windows[0];
         assert!(w.fullscreen.is_some_and(|f| f.global) && w.urgent && w.sticky);
         assert_eq!(w.rect, Rect::new(0.0, 0.0, 10.0, 10.0));
+        assert_eq!(w.toplevel.as_deref(), Some("4756f54d"));
+    }
+
+    #[test]
+    fn no_toplevel_identifier_before_sway_1_11() {
+        assert!(tree().workspaces().flat_map(|w| &w.windows).all(|w| w.toplevel.is_none()));
     }
 }

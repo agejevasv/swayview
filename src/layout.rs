@@ -31,6 +31,8 @@ pub struct WinItem {
     pub urgent: bool,
     /// States worth naming, e.g. `float`.
     pub tags: Vec<&'static str>,
+    /// See `Window::toplevel`.
+    pub toplevel: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -131,6 +133,7 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
                 urgent: win.urgent,
                 workspace: i,
                 tags: tags(win),
+                toplevel: win.toplevel.clone(),
             });
         }
         scene.workspaces.push(WsItem {

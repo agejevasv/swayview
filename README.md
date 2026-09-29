@@ -2,7 +2,8 @@
 
 A workspace overview for sway. Every workspace is shown as a small copy of your
 screen, with windows labelled by app and title. It reads the layout live from
-sway, with no screenshots and no daemon.
+sway, with no daemon. On sway 1.11 and later, windows also show their
+contents, captured once per window and faded in together.
 
 ## Install
 
@@ -46,6 +47,7 @@ Mistakes are reported on stderr, so run `swayview` in a terminal to see them.
 All keys, with their defaults:
 
 ```yaml
+thumbnails: true          # window contents, on sway 1.11 and later
 fonts:
   app:                    # app name line, and workspace numbers
     family: "sans-serif"  # any fontconfig family, e.g. "Inter" or "monospace"
