@@ -13,7 +13,7 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputInfo, OutputState},
     reexports::{
         calloop::{
-            EventLoop,
+            EventLoop, LoopHandle,
             channel::{self, Channel},
         },
         calloop_wayland_source::WaylandSource,
@@ -88,6 +88,8 @@ struct App {
     shm: Shm,
     pool: SlotPool,
     qh: QueueHandle<App>,
+    /// For the key repeat timer.
+    loop_handle: LoopHandle<'static, App>,
     renderer: Renderer,
     ipc: Ipc,
     tree: Tree,
@@ -96,26 +98,28 @@ struct App {
     selected: Option<Sel>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
-    /// Output under the pointer, known while it is over one of our surfaces.
-    pointer_output: Option<String>,
+    /// Surface under the pointer, known while it is over one of ours.
+    pointer_surface: Option<usize>,
     tree_dirty: bool,
     exit: bool,
 }
 
 pub fn run() -> Result<()> {
+    // Subscribe before the first `get_tree`, so no change after it is missed.
+    let sway_events = watch_sway()?;
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let (globals, mut queue) = registry_queue_init(&conn)?;
-    let mut app = App::new(&globals, &queue.handle())?;
+    let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
+    let mut app = App::new(&globals, &queue.handle(), event_loop.handle())?;
     // Learn output names and positions before creating surfaces.
     queue.roundtrip(&mut app)?;
     app.create_surfaces();
     ensure!(!app.surfaces.is_empty(), "no Wayland output matches one of sway's outputs");
 
-    let mut event_loop: EventLoop<'_, App> = EventLoop::try_new()?;
     WaylandSource::new(conn, queue).insert(event_loop.handle()).map_err(|e| e.error)?;
     event_loop
         .handle()
-        .insert_source(watch_sway()?, |event, (), app| {
+        .insert_source(sway_events, |event, (), app| {
             if let channel::Event::Msg(()) = event {
                 app.tree_dirty = true;
             }
@@ -124,7 +128,7 @@ pub fn run() -> Result<()> {
 
     while !app.exit {
         event_loop.dispatch(None, &mut app)?;
-        if std::mem::take(&mut app.tree_dirty) {
+        if std::mem::take(&mut app.tree_dirty) && !app.exit {
             app.refresh();
         }
     }
@@ -134,13 +138,16 @@ pub fn run() -> Result<()> {
 /// Sends a message for every sway event that may change what is shown.
 fn watch_sway() -> Result<Channel<()>> {
     let (tx, rx) = channel::channel();
-    let ipc = Ipc::connect()?;
+    let mut ipc = Ipc::connect()?;
+    ipc.subscribe(&["window", "workspace"])?;
     std::thread::spawn(move || {
-        let result = ipc.subscribe(&["window", "workspace"], || {
-            let _ = tx.send(());
-        });
-        if let Err(e) = result {
-            warn(e.context("event stream ended"));
+        loop {
+            if let Err(e) = ipc.wait_event() {
+                return warn(e.context("event stream ended"));
+            }
+            if tx.send(()).is_err() {
+                return;
+            }
         }
     });
     Ok(rx)
@@ -148,7 +155,7 @@ fn watch_sway() -> Result<Channel<()>> {
 
 /// Pairs a `wl_output` with a sway output, by name (`wl_output` v4) or by position.
 fn sway_output_name(info: &OutputInfo, tree: &Tree) -> Option<String> {
-    if let Some(name) = info.name.as_ref().filter(|n| tree.outputs.iter().any(|o| &o.name == *n)) {
+    if let Some(name) = info.name.as_ref().filter(|n| tree.output(n).is_some()) {
         return Some(name.clone());
     }
     let pos = info.logical_position.unwrap_or(info.location);
@@ -160,6 +167,11 @@ fn sway_output_name(info: &OutputInfo, tree: &Tree) -> Option<String> {
 fn buffer_size((w, h): (u32, u32), scale: u32) -> (f32, (u32, u32)) {
     let f = scale.max(1) as f32 / SCALE_UNIT as f32;
     (f, ((w as f32 * f).round() as u32, (h as f32 * f).round() as u32))
+}
+
+/// An integer output scale in `SCALE_UNIT`s.
+fn integer_scale(factor: i32) -> u32 {
+    factor.max(1).unsigned_abs() * SCALE_UNIT
 }
 
 fn key_of(event: &KeyEvent) -> Option<Key<'_>> {
@@ -177,10 +189,14 @@ fn key_of(event: &KeyEvent) -> Option<Key<'_>> {
 }
 
 impl App {
-    fn new(globals: &GlobalList, qh: &QueueHandle<Self>) -> Result<Self> {
+    fn new(
+        globals: &GlobalList,
+        qh: &QueueHandle<Self>,
+        loop_handle: LoopHandle<'static, Self>,
+    ) -> Result<Self> {
         let mut ipc = Ipc::connect()?;
         let tree = ipc.get_tree()?;
-        let theme = Theme::load(ipc.config_path().ok().as_deref(), Theme::default_path().as_deref());
+        let theme = Theme::load(ipc.config_path().ok().as_deref());
         let shm = Shm::bind(globals, qh).context("wl_shm")?;
         Ok(App {
             registry_state: RegistryState::new(globals),
@@ -195,6 +211,7 @@ impl App {
             pool: SlotPool::new(1920 * 1080 * 4, &shm)?,
             shm,
             qh: qh.clone(),
+            loop_handle,
             renderer: Renderer::new(theme),
             ipc,
             initial_focus: tree.focus(),
@@ -203,7 +220,7 @@ impl App {
             selected: None,
             keyboard: None,
             pointer: None,
-            pointer_output: None,
+            pointer_surface: None,
             tree_dirty: false,
             exit: false,
         })
@@ -242,7 +259,7 @@ impl App {
                 output: name,
                 size: None,
                 // Until the preferred fractional scale arrives, the output's integer one.
-                scale: info.scale_factor.max(1).unsigned_abs() * SCALE_UNIT,
+                scale: integer_scale(info.scale_factor),
                 viewport,
                 _fractional_scale: fractional_scale,
                 scene: Scene::default(),
@@ -365,13 +382,25 @@ impl App {
         self.redraw(sel.surface);
     }
 
+    /// Handles a key press, or its repeat. Only moving the selection repeats,
+    /// so a held key cannot run a sway command twice.
+    fn key(&mut self, event: &KeyEvent, repeat: bool) {
+        let Some(key) = key_of(event) else { return };
+        if repeat && !matches!(key, Key::Arrow(_) | Key::Tab { .. }) {
+            return;
+        }
+        let action = input::key(&self.scenes(), self.selected, key);
+        self.apply(&action);
+    }
+
     fn apply(&mut self, action: &Action) {
         match action {
             Action::Nothing => {}
             Action::Select(sel) => self.select(*sel),
             Action::Close => self.exit = true,
             Action::Focus(_) | Action::WorkspaceNumber(_) => {
-                if let Some(cmd) = input::command(action, &self.tree, self.pointer_output.as_deref())
+                let pointer_output = self.pointer_surface.map(|i| self.surfaces[i].output.as_str());
+                if let Some(cmd) = input::command(action, &self.tree, pointer_output)
                     && let Err(e) = self.ipc.command(&cmd)
                 {
                     warn(e);
@@ -413,7 +442,7 @@ impl CompositorHandler for App {
         if let Some(i) = self.surface_index(surface)
             && self.surfaces[i].viewport.is_none()
         {
-            self.set_scale(surface, new_factor.max(1).unsigned_abs() * SCALE_UNIT);
+            self.set_scale(surface, integer_scale(new_factor));
         }
     }
 
@@ -481,7 +510,11 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
+            let repeat = Box::new(|app: &mut App, _: &wl_keyboard::WlKeyboard, event| app.key(&event, true));
+            self.keyboard = self
+                .seat_state
+                .get_keyboard_with_repeat(qh, &seat, None, self.loop_handle.clone(), repeat)
+                .ok();
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
@@ -541,20 +574,19 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        if let Some(key) = key_of(&event) {
-            let action = input::key(&self.scenes(), self.selected, key);
-            self.apply(&action);
-        }
+        self.key(&event, false);
     }
 
+    /// Sent by compositors that repeat keys themselves; others are repeated by a timer.
     fn repeat_key(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        self.key(&event, true);
     }
 
     fn release_key(
@@ -595,17 +627,15 @@ impl PointerHandler for App {
             let Some(i) = self.surface_index(&event.surface) else { continue };
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
             match event.kind {
-                PointerEventKind::Enter { .. } => {
-                    self.pointer_output = Some(self.surfaces[i].output.clone());
-                }
+                PointerEventKind::Enter { .. } => self.pointer_surface = Some(i),
                 // Moving over a window selects it. Enter alone does not, so a
                 // resting mouse leaves the focused window selected on open.
                 PointerEventKind::Motion { .. } => {
-                    self.pointer_output = Some(self.surfaces[i].output.clone());
+                    self.pointer_surface = Some(i);
                     let action = input::motion(&self.surfaces[i].scene, i, x, y);
                     self.apply(&action);
                 }
-                PointerEventKind::Leave { .. } => self.pointer_output = None,
+                PointerEventKind::Leave { .. } => self.pointer_surface = None,
                 PointerEventKind::Press { button: BTN_LEFT, .. } => {
                     let action = input::click(&self.surfaces[i].scene, x, y);
                     self.apply(&action);

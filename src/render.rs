@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn zero_size_is_none_not_a_panic() {
-        let mut r = Renderer::new(Theme::load(None, None));
+        let mut r = Renderer::new(Theme::load(None));
         let view = View { selected: None, selected_workspace: None };
         assert!(r.draw(&Scene::default(), &view, 0, 10, 1.0).is_none());
         assert!(r.draw(&Scene::default(), &view, 10, 10, 1.0).is_some());

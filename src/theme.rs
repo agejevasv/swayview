@@ -74,8 +74,12 @@ impl Theme {
     }
 
     /// The theme: defaults from the sway config at `sway_config`, overridden by
-    /// the YAML file at `file` if it exists.
-    pub fn load(sway_config: Option<&Path>, file: Option<&Path>) -> Theme {
+    /// `theme.yaml` if it exists.
+    pub fn load(sway_config: Option<&Path>) -> Theme {
+        Theme::load_from(sway_config, default_path().as_deref())
+    }
+
+    fn load_from(sway_config: Option<&Path>, file: Option<&Path>) -> Theme {
         let mut theme = Theme::defaults(sway_config::load(sway_config));
         if let Some(path) = file {
             match std::fs::read_to_string(path) {
@@ -95,15 +99,6 @@ impl Theme {
         theme
     }
 
-    /// `$XDG_CONFIG_HOME/swayview/theme.yaml`, or `~/.config/swayview/theme.yaml`.
-    pub fn default_path() -> Option<PathBuf> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(config.join("swayview/theme.yaml"))
-    }
-
     fn apply(&mut self, f: ThemeFile) {
         set(&mut self.backdrop, f.backdrop);
         set(&mut self.output_name, f.output_name);
@@ -117,6 +112,15 @@ impl Theme {
         fw.selected.apply(&mut w.selected);
         fw.urgent.apply(&mut w.urgent);
     }
+}
+
+/// `$XDG_CONFIG_HOME/swayview/theme.yaml`, or `~/.config/swayview/theme.yaml`.
+fn default_path() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(config.join("swayview/theme.yaml"))
 }
 
 fn set(dst: &mut Rgba, value: Option<Rgba>) {
@@ -218,7 +222,7 @@ mod tests {
     fn with_file(name: &str, yaml: &str) -> Theme {
         let path = std::env::temp_dir().join(format!("swayview-theme-{name}-{}.yaml", std::process::id()));
         std::fs::write(&path, yaml).unwrap();
-        let theme = Theme::load(None, Some(&path));
+        let theme = Theme::load_from(None, Some(&path));
         let _ = std::fs::remove_file(&path);
         theme
     }
@@ -229,8 +233,8 @@ mod tests {
 
     #[test]
     fn no_file_gives_defaults() {
-        assert_eq!(Theme::load(None, None), defaults());
-        assert_eq!(Theme::load(None, Some(Path::new("/nonexistent/theme.yaml"))), defaults());
+        assert_eq!(Theme::load_from(None, None), defaults());
+        assert_eq!(Theme::load_from(None, Some(Path::new("/nonexistent/theme.yaml"))), defaults());
     }
 
     #[test]

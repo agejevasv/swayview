@@ -57,19 +57,20 @@ pub enum Dir {
 }
 
 impl Dir {
-    /// Offset from `from` to `to` as (distance along `self`, distance across it).
-    pub fn project(self, from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
+    /// How far `to` is from `from` going in this direction, with sideways
+    /// distance counting double; `None` if `to` is not ahead.
+    pub fn cost(self, from: (f32, f32), to: (f32, f32)) -> Option<f32> {
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-        match self {
+        let (along, across) = match self {
             Dir::Left => (-dx, dy),
             Dir::Right => (dx, dy),
             Dir::Up => (-dy, dx),
             Dir::Down => (dy, dx),
-        }
+        };
+        (along > 1.0).then_some(along + 2.0 * across.abs())
     }
 }
 
-/// Lays out the `workspaces` of `output` on a `w`×`h` surface.
 /// Lays out the workspaces of `output` on a `w`×`h` surface, below a strip
 /// with the output's name.
 pub fn build(output: &Output, w: f32, h: f32) -> Scene {
@@ -118,12 +119,16 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
         let rect = Rect::new(x, y + HEADER, box_w, box_h);
 
         for win in &ws.windows {
-            let r = output.rect.map_into(win.rect, rect).inset(WINDOW_GAP / 2.0);
+            let r = clip(output.rect.map_into(win.rect, rect).inset(WINDOW_GAP / 2.0), rect);
+            // E.g. a floating window moved off its output.
+            if r.is_empty() {
+                continue;
+            }
             scene.windows.push(WinItem {
                 id: win.id,
                 app: win.app.clone(),
                 title: win.title.clone(),
-                rect: clip(r, rect),
+                rect: r,
                 focused: win.focused,
                 urgent: win.urgent,
                 workspace: i,
@@ -142,7 +147,7 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
 }
 
 fn tags(w: &Window) -> Vec<&'static str> {
-    [(w.floating, "float"), (w.fullscreen, "fullscreen"), (w.sticky, "sticky")]
+    [(w.floating, "float"), (w.fullscreen.is_some(), "fullscreen"), (w.sticky, "sticky")]
         .into_iter()
         .filter_map(|(on, tag)| on.then_some(tag))
         .collect()
@@ -192,10 +197,7 @@ impl Scene {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != from)
-            .filter_map(|(i, w)| {
-                let (along, across) = dir.project(origin, w.rect.center());
-                (along > 1.0).then_some((i, along + 2.0 * across.abs()))
-            })
+            .filter_map(|(i, w)| Some((i, dir.cost(origin, w.rect.center())?)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| i)
     }
@@ -285,6 +287,16 @@ mod tests {
         assert_eq!(pavu.tags, ["float"]);
         let urgent = s.windows.iter().find(|w| w.urgent).unwrap();
         assert_eq!(urgent.tags, ["sticky"]);
+    }
+
+    #[test]
+    fn windows_off_the_output_are_left_out() {
+        let mut t = tree();
+        let o = &mut t.outputs[0];
+        let pavu = o.workspaces[2].windows.iter_mut().find(|w| w.app == "pavucontrol").unwrap();
+        pavu.rect.x = o.rect.w + 100.0;
+        let s = build(o, 1920.0, 1080.0);
+        assert!(s.windows.iter().all(|w| w.app != "pavucontrol" && !w.rect.is_empty()));
     }
 
     #[test]

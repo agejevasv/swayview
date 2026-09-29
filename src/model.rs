@@ -53,7 +53,7 @@ impl Rect {
     }
 
     /// Splits along `axis` into consecutive parts, one per fraction of the whole.
-    pub fn split(&self, fractions: &[f32], axis: Axis) -> Vec<Rect> {
+    fn split(&self, fractions: &[f32], axis: Axis) -> Vec<Rect> {
         let mut offset = 0.0;
         fractions
             .iter()
@@ -112,11 +112,19 @@ pub struct Window {
     pub title: String,
     pub rect: Rect,
     pub floating: bool,
-    pub fullscreen: bool,
+    /// The fullscreen container the window is in, or is.
+    pub fullscreen: Option<Fullscreen>,
     pub sticky: bool,
     /// Asks for attention.
     pub urgent: bool,
     pub focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fullscreen {
+    pub id: ConId,
+    /// Fullscreen on all outputs (`fullscreen toggle global`), not only its workspace.
+    pub global: bool,
 }
 
 /// What sway had focused before the overview took over the keyboard.
@@ -201,15 +209,22 @@ impl Tree {
         Some(WarpTarget { output: &o.name, point: o.rect.center() })
     }
 
-    /// The fullscreen window that stops sway from focusing window `id`, if any.
-    /// Sway refuses to focus windows hidden behind a fullscreen one.
+    /// The fullscreen container that stops sway from focusing window `id`, if
+    /// any: one on the same workspace, or a global one anywhere. Sway refuses
+    /// to focus windows hidden behind a fullscreen container.
     pub fn fullscreen_blocker(&self, id: ConId) -> Option<ConId> {
-        let ws = self.workspaces().find(|ws| ws.windows.iter().any(|w| w.id == id))?;
-        let target = ws.windows.iter().find(|w| w.id == id)?;
-        if target.fullscreen {
-            return None;
-        }
-        ws.windows.iter().find(|w| w.fullscreen).map(|w| w.id)
+        let (ws, target) =
+            self.workspaces().find_map(|ws| Some((ws, ws.windows.iter().find(|w| w.id == id)?)))?;
+        let own = target.fullscreen.map(|f| f.id);
+        let blocks = |f: &Fullscreen| Some(f.id) != own;
+        let local = ws.windows.iter().filter_map(|w| w.fullscreen).find(|f| !f.global && blocks(f));
+        let global = || {
+            self.workspaces()
+                .flat_map(|w| &w.windows)
+                .filter_map(|w| w.fullscreen)
+                .find(|f| f.global && blocks(f))
+        };
+        local.or_else(global).map(|f| f.id)
     }
 
     /// The output holding the focused workspace.
@@ -219,7 +234,7 @@ impl Tree {
 }
 
 fn workspace(node: &Node, output_rect: Rect) -> Workspace {
-    let mut c = Collector { floating: false, in_fullscreen: false, windows: Vec::new() };
+    let mut c = Collector { floating: false, fullscreen: None, windows: Vec::new() };
     c.children(node, node.rect.into());
     c.floating = true;
     for child in &node.floating_nodes {
@@ -258,17 +273,16 @@ enum Arrange {
 /// Collects the leaf windows of one workspace.
 struct Collector {
     floating: bool,
-    /// Inside a fullscreen container.
-    in_fullscreen: bool,
+    /// The fullscreen container being collected, if any.
+    fullscreen: Option<Fullscreen>,
     windows: Vec<Window>,
 }
 
 impl Collector {
     /// Collects `node`'s windows, drawing it into `target`.
     fn node(&mut self, node: &Node, target: Rect) {
-        // Workspace (1) or global (2), of the window or a container holding it;
-        // either way drawn in its tiled place.
-        let fullscreen = self.in_fullscreen || node.fullscreen_mode != 0;
+        // Of the window or a container holding it; either way drawn in its tiled place.
+        let fullscreen = self.fullscreen.or_else(|| node.fullscreen());
         if node.nodes.is_empty() {
             self.windows.push(Window {
                 id: node.id,
@@ -283,9 +297,9 @@ impl Collector {
             });
             return;
         }
-        let outer = std::mem::replace(&mut self.in_fullscreen, fullscreen);
+        let outer = std::mem::replace(&mut self.fullscreen, fullscreen);
         self.children(node, target);
-        self.in_fullscreen = outer;
+        self.fullscreen = outer;
     }
 
     /// Collects the windows of `node`'s tiled children, drawing it into `target`.
@@ -302,7 +316,7 @@ impl Collector {
         };
         let n = node.nodes.len();
         let slots = match arrange {
-            Arrange::Slices(axis) => target.split(&vec![1.0 / n.max(1) as f32; n], axis),
+            Arrange::Slices(axis) => target.split(&equal_shares(n), axis),
             Arrange::Shares(axis) => target.split(&shares(&node.nodes), axis),
             Arrange::Mapped => node.nodes.iter().map(|c| own.map_into(c.outer_rect(), target)).collect(),
         };
@@ -316,7 +330,7 @@ impl Collector {
 /// fullscreen child's own share is meaningless, so it gets what its siblings
 /// leave. Falls back to equal shares when the numbers do not add up.
 fn shares(children: &[Node]) -> Vec<f32> {
-    let equal = vec![1.0 / children.len().max(1) as f32; children.len()];
+    let equal = equal_shares(children.len());
     let known = |c: &Node| c.percent.filter(|p| c.fullscreen_mode == 0 && *p > 0.0 && *p <= 1.0);
     let taken: f32 = children.iter().filter_map(known).sum();
     let unknown = children.iter().filter(|c| known(c).is_none()).count();
@@ -330,6 +344,10 @@ fn shares(children: &[Node]) -> Vec<f32> {
         return equal;
     }
     fractions.iter().map(|f| f / total).collect()
+}
+
+fn equal_shares(n: usize) -> Vec<f32> {
+    vec![1.0 / n.max(1) as f32; n]
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -419,6 +437,10 @@ impl Node {
         r.y -= deco;
         r.h += deco;
         r
+    }
+
+    fn fullscreen(&self) -> Option<Fullscreen> {
+        (self.fullscreen_mode != 0).then_some(Fullscreen { id: self.id, global: self.fullscreen_mode == 2 })
     }
 
     fn any_focused(&self) -> bool {
@@ -527,7 +549,7 @@ pub(crate) mod tests {
 
     fn workspace_1(json: &[u8]) -> Vec<(String, Rect, bool)> {
         let t = Tree::from_json(json).unwrap();
-        ws(&t, "1").windows.iter().map(|w| (w.title.clone(), w.rect, w.fullscreen)).collect()
+        ws(&t, "1").windows.iter().map(|w| (w.title.clone(), w.rect, w.fullscreen.is_some())).collect()
     }
 
     #[test]
@@ -560,6 +582,33 @@ pub(crate) mod tests {
         // Other workspaces are not affected.
         assert_eq!(t.fullscreen_blocker(id("Downloads")), None);
         assert_eq!(tree().fullscreen_blocker(id("GitHub")), None);
+    }
+
+    #[test]
+    fn fullscreen_container_and_global_block_focus() {
+        // Workspace 1: split 10 (A, B) and C; workspace 2: D.
+        let json = |split_mode, d_mode| {
+            format!(
+                r#"{{"id":1,"type":"root","rect":{{"x":0,"y":0,"width":10,"height":10}},
+                "nodes":[{{"id":2,"name":"X","type":"output","rect":{{"x":0,"y":0,"width":10,"height":10}},"nodes":[
+                  {{"id":3,"name":"1","type":"workspace","rect":{{"x":0,"y":0,"width":10,"height":10}},"nodes":[
+                    {{"id":10,"type":"con","fullscreen_mode":{split_mode},"rect":{{"x":0,"y":0,"width":5,"height":10}},"nodes":[
+                      {{"id":11,"type":"con","rect":{{"x":0,"y":0,"width":5,"height":5}}}},
+                      {{"id":12,"type":"con","rect":{{"x":0,"y":5,"width":5,"height":5}}}}]}},
+                    {{"id":13,"type":"con","rect":{{"x":5,"y":0,"width":5,"height":10}}}}]}},
+                  {{"id":4,"name":"2","type":"workspace","rect":{{"x":0,"y":0,"width":10,"height":10}},"nodes":[
+                    {{"id":14,"type":"con","fullscreen_mode":{d_mode},"rect":{{"x":0,"y":0,"width":10,"height":10}}}}]}}]}}]}}"#
+            )
+        };
+        let t = Tree::from_json(json(1, 0).as_bytes()).unwrap();
+        // The container is disabled, not a window inside it.
+        assert_eq!(t.fullscreen_blocker(ConId(13)), Some(ConId(10)));
+        assert_eq!(t.fullscreen_blocker(ConId(12)), None);
+        assert_eq!(t.fullscreen_blocker(ConId(14)), None);
+
+        let t = Tree::from_json(json(0, 2).as_bytes()).unwrap();
+        assert_eq!(t.fullscreen_blocker(ConId(11)), Some(ConId(14)));
+        assert_eq!(t.fullscreen_blocker(ConId(14)), None);
     }
 
     #[test]
@@ -602,7 +651,7 @@ pub(crate) mod tests {
                   "rect":{"x":0,"y":0,"width":5,"height":5}}]}]}]}"#;
         let t = Tree::from_json(json).unwrap();
         let w = &t.outputs[0].workspaces[0].windows[0];
-        assert!(w.fullscreen && w.urgent && w.sticky);
+        assert!(w.fullscreen.is_some_and(|f| f.global) && w.urgent && w.sticky);
         assert_eq!(w.rect, Rect::new(0.0, 0.0, 10.0, 10.0));
     }
 }

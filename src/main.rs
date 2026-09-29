@@ -75,9 +75,9 @@ fn render_png(args: &Args, out: &str) -> Result<()> {
         None => sway::Ipc::connect()?.get_tree()?,
     };
     let config = sway::Ipc::connect().and_then(|mut ipc| ipc.config_path()).ok();
-    let theme = Theme::load(config.as_deref(), Theme::default_path().as_deref());
+    let theme = Theme::load(config.as_deref());
     let output = match &args.output {
-        Some(name) => tree.outputs.iter().find(|o| &o.name == name),
+        Some(name) => tree.output(name),
         None => tree.focused_output().or(tree.outputs.first()),
     }
     .context("no such output")?;

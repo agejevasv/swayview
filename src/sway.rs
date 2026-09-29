@@ -1,9 +1,9 @@
-//! Minimal sway IPC client: `get_tree`, `run_command`, subscribe.
+//! Minimal sway IPC client: `get_tree`, `get_version`, `run_command`, subscribe.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::model::Tree;
 
@@ -32,9 +32,7 @@ impl Ipc {
         msg.extend_from_slice(payload.as_bytes());
         self.0.write_all(&msg)?;
         let (reply_ty, body) = self.read_message()?;
-        if reply_ty != ty {
-            bail!("unexpected IPC reply type {reply_ty:#x} to {ty}");
-        }
+        ensure!(reply_ty == ty, "unexpected IPC reply type {reply_ty:#x} to {ty}");
         Ok(body)
     }
 
@@ -42,14 +40,10 @@ impl Ipc {
         let mut header = [0u8; 14];
         self.0.read_exact(&mut header)?;
         let [m0, m1, m2, m3, m4, m5, l0, l1, l2, l3, t0, t1, t2, t3] = header;
-        if [m0, m1, m2, m3, m4, m5] != *MAGIC {
-            bail!("bad IPC magic");
-        }
+        ensure!([m0, m1, m2, m3, m4, m5] == *MAGIC, "bad IPC magic");
         let len = u32::from_ne_bytes([l0, l1, l2, l3]) as usize;
         let ty = u32::from_ne_bytes([t0, t1, t2, t3]);
-        if len > MAX_MESSAGE {
-            bail!("IPC message of {len} bytes is too large");
-        }
+        ensure!(len <= MAX_MESSAGE, "IPC message of {len} bytes is too large");
         let mut body = vec![0; len];
         self.0.read_exact(&mut body)?;
         Ok((ty, body))
@@ -76,16 +70,16 @@ impl Ipc {
         Ok(())
     }
 
-    /// Subscribes to `events` and calls `on_event` for each one until the connection fails.
-    pub fn subscribe(mut self, events: &[&str], mut on_event: impl FnMut()) -> Result<()> {
+    /// Subscribes to `events`; wait for them with `wait_event`.
+    pub fn subscribe(&mut self, events: &[&str]) -> Result<()> {
         let reply: serde_json::Value =
             serde_json::from_slice(&self.request(SUBSCRIBE, &serde_json::to_string(events)?)?)?;
-        if reply["success"] != true {
-            bail!("subscribe failed: {reply}");
-        }
-        loop {
-            self.read_message()?;
-            on_event();
-        }
+        ensure!(reply["success"] == true, "subscribe failed: {reply}");
+        Ok(())
+    }
+
+    /// Blocks until the next subscribed event arrives.
+    pub fn wait_event(&mut self) -> Result<()> {
+        self.read_message().map(drop)
     }
 }

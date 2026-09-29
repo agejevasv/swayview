@@ -81,7 +81,7 @@ fn cycle(scenes: &[&Scene], sel: Option<Sel>, back: bool) -> Option<Sel> {
     let mut surfaces: Vec<usize> = (0..scenes.len()).collect();
     surfaces.sort_by(|&a, &b| {
         let (a, b) = (scenes[a].output, scenes[b].output);
-        (a.x, a.y).partial_cmp(&(b.x, b.y)).unwrap_or(std::cmp::Ordering::Equal)
+        a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y))
     });
     let order: Vec<Sel> = surfaces
         .into_iter()
@@ -113,10 +113,7 @@ fn step(scenes: &[&Scene], sel: Sel, dir: Dir) -> Option<Sel> {
         .iter()
         .enumerate()
         .filter(|(i, s)| *i != sel.surface && !s.windows.is_empty())
-        .filter_map(|(i, s)| {
-            let (along, across) = dir.project(origin, s.output.center());
-            (along > 0.0).then_some((i, along + 2.0 * across.abs()))
-        })
+        .filter_map(|(i, s)| Some((i, dir.cost(origin, s.output.center())?)))
         .min_by(|a, b| a.1.total_cmp(&b.1))?
         .0;
 

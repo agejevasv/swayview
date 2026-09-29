@@ -4,6 +4,7 @@
 //! following `set $var` and `include`. Anything unreadable or malformed is
 //! skipped, leaving the defaults in place.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::color::Rgba;
@@ -33,13 +34,11 @@ impl Default for Clients {
     }
 }
 
-const MAX_INCLUDE_DEPTH: usize = 8;
-
 /// Colors from the sway config at `path`, or sway's defaults.
 pub fn load(path: Option<&Path>) -> Clients {
-    let mut parser = Parser { clients: Clients::default(), vars: Vec::new() };
+    let mut parser = Parser { clients: Clients::default(), vars: Vec::new(), loaded: HashSet::new() };
     if let Some(path) = path {
-        parser.file(path, 0);
+        parser.file(path);
     }
     parser.clients
 }
@@ -48,11 +47,14 @@ struct Parser {
     clients: Clients,
     /// `$name` → value, in definition order.
     vars: Vec<(String, String)>,
+    /// Files read so far; as in sway, each is read only once, which also ends include cycles.
+    loaded: HashSet<PathBuf>,
 }
 
 impl Parser {
-    fn file(&mut self, path: &Path, depth: usize) {
-        if depth > MAX_INCLUDE_DEPTH {
+    fn file(&mut self, path: &Path) {
+        let Ok(real) = path.canonicalize() else { return };
+        if !self.loaded.insert(real) {
             return;
         }
         let Ok(text) = std::fs::read_to_string(path) else { return };
@@ -64,14 +66,14 @@ impl Parser {
                 line.push_str(head);
             } else {
                 line.push_str(part);
-                self.line(line.trim(), dir, depth);
+                self.line(line.trim(), dir);
                 line.clear();
             }
         }
-        self.line(line.trim(), dir, depth);
+        self.line(line.trim(), dir);
     }
 
-    fn line(&mut self, line: &str, dir: &Path, depth: usize) {
+    fn line(&mut self, line: &str, dir: &Path) {
         if line.is_empty() || line.starts_with('#') {
             return;
         }
@@ -80,36 +82,30 @@ impl Parser {
             "set" => {
                 let (name, value) = split_word(rest);
                 if name.starts_with('$') {
-                    let value = self.expand(value);
+                    let value = unquote(&self.expand(value)).to_string();
                     self.vars.retain(|(n, _)| n != name);
                     self.vars.push((name.to_string(), value));
                 }
             }
             "include" => {
                 for path in resolve(&expand_env(&self.expand(rest)), dir) {
-                    self.file(&path, depth + 1);
+                    self.file(&path);
                 }
             }
-            _ => {
-                if !cmd.starts_with("client.") {
-                    return;
-                }
+            "client.focused" | "client.unfocused" | "client.urgent" => {
                 let args = self.expand(rest);
+                let colors: Option<Vec<_>> =
+                    args.split_whitespace().map(|a| Rgba::parse(unquote(a))).collect();
+                // The indicator and child border that may follow are not drawn.
+                let Some(&[border, background, text, ..]) = colors.as_deref() else { return };
                 let class = match cmd {
                     "client.focused" => &mut self.clients.focused,
                     "client.unfocused" => &mut self.clients.unfocused,
-                    "client.urgent" => &mut self.clients.urgent,
-                    _ => return,
+                    _ => &mut self.clients.urgent,
                 };
-                let Some(colors) = args.split_whitespace().map(Rgba::parse).collect::<Option<Vec<_>>>()
-                else {
-                    return;
-                };
-                // The indicator and child border that may follow are not drawn.
-                if let &[border, background, text, ..] = colors.as_slice() {
-                    *class = Class { border, background, text };
-                }
+                *class = Class { border, background, text };
             }
+            _ => {}
         }
     }
 
@@ -123,6 +119,11 @@ impl Parser {
         }
         out
     }
+}
+
+/// `s` without surrounding quotes, which sway strips from arguments.
+fn unquote(s: &str) -> &str {
+    ['"', '\''].into_iter().find_map(|q| s.strip_prefix(q)?.strip_suffix(q)).unwrap_or(s)
 }
 
 fn split_word(s: &str) -> (&str, &str) {
@@ -160,7 +161,8 @@ fn expand_env(s: &str) -> String {
     out
 }
 
-/// Paths for an include argument, relative to `dir`, with `*`/`?` in the file name.
+/// Paths for an include argument, relative to `dir`, with `*`/`?` in the file
+/// name. As in a shell, wildcards do not match a leading `.`.
 fn resolve(pattern: &str, dir: &Path) -> Vec<PathBuf> {
     let path = dir.join(pattern);
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return Vec::new() };
@@ -171,7 +173,11 @@ fn resolve(pattern: &str, dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(parent) else { return Vec::new() };
     let mut paths: Vec<_> = entries
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_str().is_some_and(|n| wildcard(name.as_bytes(), n.as_bytes())))
+        .filter(|e| {
+            e.file_name().to_str().is_some_and(|n| {
+                (!n.starts_with('.') || name.starts_with('.')) && wildcard(name.as_bytes(), n.as_bytes())
+            })
+        })
         .map(|e| e.path())
         .collect();
     paths.sort();
@@ -211,14 +217,16 @@ mod tests {
         std::fs::create_dir(dir.join("config.d")).unwrap();
         std::fs::write(
             dir.join("config"),
-            "set $bg #101010\nset $bg2 #202020cc\n\
+            "set $bg #101010\nset $bg2 \"#202020cc\"\n\
              client.focused #111111 $bg #eeeeee #ff0000 #00ff00\n\
              client.unfocused not-a-color #000000 #ffffff\n\
              include config.d/*\n",
         )
         .unwrap();
-        std::fs::write(dir.join("config.d/10-colors"), "client.unfocused #222222 $bg2 #999999\n").unwrap();
+        std::fs::write(dir.join("config.d/10-colors"), "client.unfocused '#222222' $bg2 #999999\n").unwrap();
         std::fs::write(dir.join("config.d/20-other"), "# nothing\nbindsym x exec y\n").unwrap();
+        // Hidden files are not matched by `*`.
+        std::fs::write(dir.join("config.d/.30-hidden"), "client.urgent #010101 #010101 #010101\n").unwrap();
 
         let t = load(Some(&dir.join("config")));
         let class = |border, background, text| Class {
@@ -234,12 +242,14 @@ mod tests {
     }
 
     #[test]
-    fn include_cycles_terminate() {
+    fn files_are_included_once() {
         let dir = temp_dir("cycle");
-        std::fs::write(dir.join("config"), "include config\nclient.focused #010101 #020202 #030303\n")
-            .unwrap();
+        std::fs::write(dir.join("colors"), "client.focused #010101 #020202 #030303\n").unwrap();
+        let config =
+            "include config\ninclude colors\nclient.focused #0a0a0a #0b0b0b #0c0c0c\ninclude colors\n";
+        std::fs::write(dir.join("config"), config).unwrap();
         let t = load(Some(&dir.join("config")));
-        assert_eq!(t.focused.border, Rgba(0x010101ff));
+        assert_eq!(t.focused.border, Rgba(0x0a0a0aff));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
