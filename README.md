@@ -5,7 +5,31 @@ your screen, with each window drawn as a box labelled with its app and title.
 It reads the layout live over sway IPC. There are no screenshots, no daemon and
 no cache.
 
-## Build and install
+## Requirements
+
+- sway 1.4 or later (or SwayFX). Other compositors are not supported: swayview
+  talks to sway over its IPC socket. Fractional output scales render sharply
+  with sway 1.8 or later; older versions round the scale up.
+- `libxkbcommon`, which every Wayland desktop has.
+- `fc-match` from fontconfig, optional: without it, start-up is slower as
+  every installed font is scanned.
+
+## Install
+
+Release builds for x86_64 Linux are on the
+[releases page](https://github.com/agejevasv/swayview/releases). They need
+glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36 and newer, Arch).
+
+```sh
+tar xzf swayview-v*-x86_64-linux.tar.gz
+sudo install -m755 swayview-v*-x86_64-linux/swayview /usr/local/bin/
+```
+
+### From source
+
+Needs Rust 1.89 or later (use [rustup](https://rustup.rs) if your
+distribution's Rust is older) and the `libxkbcommon` development files
+(`libxkbcommon-dev` on Debian and Ubuntu).
 
 ```sh
 make                 # release build
@@ -36,13 +60,21 @@ made that way, with `swaymsg -t get_tree`.
 cargo run -p fake-window -- firefox "GitHub - Mozilla Firefox"
 ```
 
+## Releases
+
+Pushing a tag that matches the version in `Cargo.toml`, like `v0.1.0`, runs
+the checks, builds the x86_64 binary and publishes it as a GitHub release.
+
 ## sway config
 
 ```
 bindsym $mod+Tab exec pkill -x swayview || swayview
 ```
 
-Pressing the binding again closes the overview.
+Pressing the binding again closes the overview. While open, swayview takes
+all keyboard input; this binding still works, as sway handles its own bindings
+first. Warnings (for example about `theme.yaml`) go to stderr, which is sway's
+log when started from a binding; run `swayview` in a terminal to see them.
 
 ## Use
 

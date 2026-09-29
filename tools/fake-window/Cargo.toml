@@ -1,7 +1,9 @@
 [package]
 name = "fake-window"
 version = "0.1.0"
-edition = "2024"
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "Blank Wayland window with a chosen app_id and title, for faking sway layouts in tests"
 

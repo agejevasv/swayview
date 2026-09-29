@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    # The oldest Ubuntu runner, so the binary needs only glibc 2.35.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install libxkbcommon
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check the tag matches the version in Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "swayview") | .version')
+          test "$GITHUB_REF_NAME" = "v$version"
+      - run: make check
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="swayview-$GITHUB_REF_NAME-x86_64-linux"
+          mkdir "$name"
+          cp target/release/swayview README.md LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" swayview-*.tar.gz* --title "$GITHUB_REF_NAME" --generate-notes

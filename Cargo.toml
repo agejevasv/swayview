@@ -1,7 +1,11 @@
 [package]
 name = "swayview"
 version = "0.1.0"
-edition = "2024"
+description = "Live workspace overview for sway"
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
@@ -23,6 +27,12 @@ workspace = true
 
 [workspace]
 members = ["tools/fake-window"]
+
+[workspace.package]
+license = "MIT"
+repository = "https://github.com/agejevasv/swayview"
+edition = "2024"
+rust-version = "1.89"
 
 [workspace.dependencies]
 smithay-client-toolkit = "0.21.1"
