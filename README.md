@@ -5,8 +5,6 @@ screen, with windows labelled by app and title. It reads the layout live from
 sway, with no daemon. On sway 1.12 and later, windows also show their
 contents, live.
 
-<img width="8000" height="3080" alt="image" src="https://raw.githubusercontent.com/agejevasv/swayview/main/.github/images/screenshot.png" />
-
 ## Install
 
 Needs sway 1.4 or later.
