@@ -9,7 +9,7 @@ const WINDOW_GAP: f32 = 3.0;
 /// A workspace box never gets larger than this fraction of the surface.
 const MAX_BOX: f32 = 0.5;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct WsItem {
     pub name: String,
     pub header: Rect,
@@ -19,7 +19,7 @@ pub struct WsItem {
     pub urgent: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct WinItem {
     pub id: ConId,
     pub app: String,
@@ -35,7 +35,7 @@ pub struct WinItem {
     pub toplevel: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Scene {
     /// Name of the sway output this scene is shown on, e.g. `eDP-1`.
     pub output_name: String,

@@ -21,13 +21,11 @@ use smithay_client_toolkit::{
             globals::GlobalList,
             protocol::{
                 wl_buffer::{self, WlBuffer},
-                wl_compositor::WlCompositor,
                 wl_shm,
             },
         },
     },
     shm::{Shm, raw::RawPool},
-    subcompositor::SubcompositorState,
 };
 use wayland_protocols::ext::{
     foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
@@ -36,18 +34,15 @@ use wayland_protocols::ext::{
         ext_image_capture_source_v1::ExtImageCaptureSourceV1,
     },
     image_copy_capture::v1::client::{
-        ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
+        ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1, FailureReason},
         ext_image_copy_capture_manager_v1::{ExtImageCopyCaptureManagerV1, Options},
         ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
     },
 };
-use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
 use super::{App, NoEvents};
 use crate::warn;
 
-/// Larger windows are not captured; keeps buffer sizes well within `i32`.
-const MAX_SIDE: u32 = 16384;
 /// Live updates per window per second, at most.
 const LIVE_FPS: u64 = 15;
 /// Failed frames in a row after which a window is not asked again.
@@ -58,12 +53,10 @@ const MAX_FAILURES: u32 = 3;
 const FORMATS: [wl_shm::Format; 4] =
     [wl_shm::Format::Argb8888, wl_shm::Format::Abgr8888, wl_shm::Format::Xrgb8888, wl_shm::Format::Xbgr8888];
 
-pub struct Capture {
+pub(super) struct Capture {
     toplevels: ForeignToplevelList,
     sources: ExtForeignToplevelImageCaptureSourceManagerV1,
     copier: ExtImageCopyCaptureManagerV1,
-    pub(super) subcompositor: SubcompositorState,
-    pub(super) viewporter: WpViewporter,
     /// By window identifier.
     streams: HashMap<String, Stream>,
 }
@@ -76,23 +69,22 @@ struct Stream {
     size: (u32, u32),
     formats: Vec<wl_shm::Format>,
     constrained: bool,
-    /// Two buffers of `size`, so one can be filled while the other is shown.
+    /// Two buffers of `size`: the latest frame's, and one to capture into.
     slots: Vec<Slot>,
     /// A frame being captured, and the slot it goes to.
     frame: Option<(ExtImageCopyCaptureFrameV1, usize)>,
-    /// The slot with the latest frame.
     latest: Option<usize>,
     /// The latest frame went to a tile; only then are more asked for.
     on_screen: bool,
     failures: u32,
-    /// Stopped by sway, or failing; no more frames are asked for.
+    /// Failing, or unusable; no more frames are asked for.
     dead: bool,
 }
 
 struct Slot {
     buffer: WlBuffer,
     size: (u32, u32),
-    /// Being filled, or shown and not released by sway yet.
+    /// Being captured into, or shown and not yet released by sway.
     busy: bool,
 }
 
@@ -103,21 +95,12 @@ struct StreamId(String);
 struct SlotId(String, usize);
 
 impl Capture {
-    /// `None` if the compositor cannot capture single windows or show them scaled.
-    pub fn new(
-        globals: &GlobalList,
-        qh: &QueueHandle<App>,
-        compositor: &WlCompositor,
-        viewporter: Option<&WpViewporter>,
-    ) -> Option<Self> {
-        let sources = globals.bind(qh, 1..=1, NoEvents).ok()?;
-        let copier = globals.bind(qh, 1..=1, NoEvents).ok()?;
+    /// `None` if the compositor cannot capture single windows.
+    pub(super) fn new(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<Self> {
         Some(Capture {
-            subcompositor: SubcompositorState::bind(compositor.clone(), globals, qh).ok()?,
-            viewporter: viewporter?.clone(),
+            sources: globals.bind(qh, 1..=1, NoEvents).ok()?,
+            copier: globals.bind(qh, 1..=1, NoEvents).ok()?,
             toplevels: ForeignToplevelList::new(globals, qh),
-            sources,
-            copier,
             streams: HashMap::new(),
         })
     }
@@ -128,40 +111,51 @@ impl Capture {
     }
 
     /// Whether every window has its first frame, or will not get one.
-    pub fn settled(&self) -> bool {
+    pub(super) fn settled(&self) -> bool {
         self.streams.values().all(|s| s.latest.is_some() || s.dead)
     }
 
-    /// The buffer with window `id`'s latest frame, and its size.
-    pub fn latest(&self, id: &str) -> Option<(&WlBuffer, (u32, u32))> {
-        let stream = self.streams.get(id)?;
-        let slot = &stream.slots[stream.latest?];
-        Some((&slot.buffer, slot.size))
+    /// The buffer with window `id`'s latest frame, and its size, to be shown:
+    /// it is kept until sway releases it.
+    pub(super) fn take_latest(&mut self, id: &str) -> Option<(WlBuffer, (u32, u32))> {
+        let stream = self.streams.get_mut(id)?;
+        let slot = &mut stream.slots[stream.latest?];
+        slot.busy = true;
+        stream.on_screen = true;
+        Some((slot.buffer.clone(), slot.size))
     }
 
-    /// Frees the buffer with window `id`'s latest frame if it was not shown;
-    /// a shown one stays busy until sway releases it.
-    pub fn shown_latest(&mut self, id: &str, shown: bool) {
+    /// Frees the buffer with window `id`'s latest frame, which no tile shows.
+    pub(super) fn skip_latest(&mut self, id: &str) {
         if let Some(stream) = self.streams.get_mut(id)
             && let Some(slot) = stream.latest
         {
-            stream.slots[slot].busy = shown;
-            stream.on_screen = shown;
+            stream.slots[slot].busy = false;
+            stream.on_screen = false;
         }
     }
 }
 
 impl Stream {
-    /// Asks for the next frame into a free buffer, making new buffers first
-    /// if the window changed size.
-    fn request(&mut self, id: &str, shm: &Shm, qh: &QueueHandle<App>) -> Result<()> {
+    /// Asks for the next frame; on an error, gives up on the window.
+    fn request(&mut self, id: &str, shm: &Shm, qh: &QueueHandle<App>) {
+        if let Err(e) = self.try_request(id, shm, qh) {
+            warn(e.context("window capture"));
+            self.dead = true;
+        }
+    }
+
+    /// Asks for the next frame into the buffer not holding the latest one,
+    /// making new buffers first if the window changed size.
+    fn try_request(&mut self, id: &str, shm: &Shm, qh: &QueueHandle<App>) -> Result<()> {
         if self.dead || !self.constrained || self.frame.is_some() {
             return Ok(());
         }
         if self.slots.first().is_none_or(|s| s.size != self.size) {
             self.make_slots(id, shm, qh)?;
         }
-        let Some(slot) = self.slots.iter().position(|s| !s.busy) else { return Ok(()) };
+        let free = |i: &usize| !self.slots[*i].busy && Some(*i) != self.latest;
+        let Some(slot) = (0..self.slots.len()).find(free) else { return Ok(()) };
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let frame = self.session.create_frame(qh, StreamId(id.to_owned()));
         frame.attach_buffer(&self.slots[slot].buffer);
@@ -174,13 +168,13 @@ impl Stream {
 
     fn make_slots(&mut self, id: &str, shm: &Shm, qh: &QueueHandle<App>) -> Result<()> {
         let (w, h) = self.size;
-        let sides = 1..=MAX_SIDE;
-        ensure!(sides.contains(&w) && sides.contains(&h), "unusable window size {w}×{h}");
+        let len = w as usize * h as usize * 4;
+        // Sizes and offsets in wl_shm are `i32`.
+        ensure!(len > 0 && i32::try_from(2 * len).is_ok(), "unusable window size {w}×{h}");
         let format = FORMATS
             .into_iter()
             .find(|f| self.formats.contains(f))
             .with_context(|| format!("no supported pixel format in {:?}", self.formats))?;
-        let len = w as usize * h as usize * 4;
         let mut pool = RawPool::new(2 * len, shm)?;
         // The buffers keep the pool's memory. A replaced buffer may still be
         // shown; destroying it leaves sway's copy.
@@ -252,10 +246,7 @@ impl App {
         let inserted = self.loop_handle.insert_source(Timer::from_duration(interval), move |_, (), app| {
             if let Some(capture) = &mut app.capture {
                 for (id, stream) in capture.streams.iter_mut().filter(|(_, s)| s.on_screen) {
-                    if let Err(e) = stream.request(id, &app.shm, &app.qh) {
-                        warn(e.context("window capture"));
-                        stream.dead = true;
-                    }
+                    stream.request(id, &app.shm, &app.qh);
                 }
             }
             TimeoutAction::ToDuration(interval)
@@ -291,23 +282,25 @@ impl Dispatch2<ExtImageCopyCaptureSessionV1, App> for StreamId {
         qh: &QueueHandle<App>,
     ) {
         use ext_image_copy_capture_session_v1::Event;
-        let Some(stream) = app.capture.as_mut().and_then(|c| c.streams.get_mut(&self.0)) else { return };
+        let Some(capture) = &mut app.capture else { return };
+        // The window is gone; a tile showing it keeps sway's copy of its last frame.
+        if let Event::Stopped = event {
+            capture.streams.remove(&self.0);
+            return;
+        }
+        let Some(stream) = capture.streams.get_mut(&self.0) else { return };
         match event {
+            // Starts the constraints, sent again whenever the window changes size.
             Event::BufferSize { width, height } => {
                 stream.size = (width, height);
                 stream.formats.clear();
+                stream.constrained = false;
             }
             Event::ShmFormat { format: WEnum::Value(format) } => stream.formats.push(format),
-            // Sent again when the window changes size; a frame in flight then
-            // fails, and the next one is asked for at the new size.
             Event::Done => {
                 stream.constrained = true;
-                if let Err(e) = stream.request(&self.0, &app.shm, qh) {
-                    warn(e.context("window capture"));
-                    stream.dead = true;
-                }
+                stream.request(&self.0, &app.shm, qh);
             }
-            Event::Stopped => stream.dead = true,
             _ => {}
         }
     }
@@ -332,18 +325,24 @@ impl Dispatch2<ExtImageCopyCaptureFrameV1, App> for StreamId {
                 stream.failures = 0;
                 app.show_capture(&self.0);
             }
-            Event::Failed { .. } => {
+            Event::Failed { reason } => {
                 let Some((frame, slot)) = stream.frame.take() else { return };
                 frame.destroy();
                 stream.slots[slot].busy = false;
-                stream.failures += 1;
-                stream.dead |= stream.failures >= MAX_FAILURES;
-                // Before the first frame, live updates have not started to ask again.
-                if stream.latest.is_none()
-                    && let Err(e) = stream.request(&self.0, &app.shm, qh)
-                {
-                    warn(e.context("window capture"));
-                    stream.dead = true;
+                match reason {
+                    // The window changed size, and the new size came just
+                    // before; the next frame is asked for at that size.
+                    WEnum::Value(FailureReason::BufferConstraints) => {}
+                    // Followed by the session's `stopped`.
+                    WEnum::Value(FailureReason::Stopped) => return,
+                    _ => {
+                        stream.failures += 1;
+                        stream.dead |= stream.failures >= MAX_FAILURES;
+                    }
+                }
+                // Before the first frame, live updates do not ask again.
+                if stream.latest.is_none() {
+                    stream.request(&self.0, &app.shm, qh);
                 }
             }
             _ => {}

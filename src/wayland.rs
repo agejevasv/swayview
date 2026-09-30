@@ -4,6 +4,9 @@
 //! Redraws are throttled to the compositor's frame callbacks. Each surface is
 //! rendered at its output's scale, fractional where the compositor supports
 //! `wp_fractional_scale_v1` and `wp_viewporter`, integer otherwise.
+//!
+//! With thumbnails, each window is a tile of two subsurfaces instead, see
+//! `tiles`, showing frames from `capture`.
 
 mod capture;
 mod tiles;
@@ -17,7 +20,7 @@ use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
     dispatch2::Dispatch2,
-    output::{OutputHandler, OutputInfo, OutputState},
+    output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
             EventLoop, LoopHandle,
@@ -45,6 +48,7 @@ use smithay_client_toolkit::{
         },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
+    subcompositor::SubcompositorState,
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{
@@ -100,13 +104,16 @@ struct App {
     viewporter: Option<WpViewporter>,
     /// Used only with a viewporter.
     fractional_scale: Option<WpFractionalScaleManagerV1>,
+    /// Bound only for thumbnails.
+    subcompositor: Option<SubcompositorState>,
     shm: Shm,
     pool: SlotPool,
+    /// To send each surface as soon as it is drawn.
+    conn: Connection,
     qh: QueueHandle<App>,
-    /// For the key repeat timer.
+    /// For timers.
     loop_handle: LoopHandle<'static, App>,
-    /// Loaded on a thread while the first frames are captured.
-    loading: Option<JoinHandle<Renderer>>,
+    /// Present once the fonts are loaded, before the surfaces are made.
     renderer: Option<Renderer>,
     /// Present when thumbnails are on and the compositor can capture windows.
     capture: Option<Capture>,
@@ -129,7 +136,7 @@ pub fn run() -> Result<()> {
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let (globals, mut queue) = registry_queue_init(&conn)?;
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
-    let mut app = App::new(&globals, &queue.handle(), event_loop.handle())?;
+    let (mut app, fonts) = App::new(&conn, &globals, &queue.handle(), event_loop.handle())?;
     // Learn output names and positions, and the windows to capture.
     queue.roundtrip(&mut app)?;
     if app.capture.is_some() {
@@ -154,7 +161,8 @@ pub fn run() -> Result<()> {
     {
         event_loop.dispatch(left, &mut app)?;
     }
-    app.create_surfaces()?;
+    app.renderer = Some(fonts.join().map_err(|_| anyhow!("loading fonts failed"))?);
+    app.create_surfaces();
     ensure!(!app.surfaces.is_empty(), "no Wayland output matches one of sway's outputs");
     app.start_live_updates();
 
@@ -185,24 +193,30 @@ fn watch_sway() -> Result<Channel<()>> {
     Ok(rx)
 }
 
-/// Pairs a `wl_output` with a sway output, by name (`wl_output` v4) or by position.
-fn sway_output_name(info: &OutputInfo, tree: &Tree) -> Option<String> {
-    if let Some(name) = info.name.as_ref().filter(|n| tree.output(n).is_some()) {
-        return Some(name.clone());
+/// The sway output a `wl_output` is: by its `name` (`wl_output` v4), or else
+/// by its position.
+fn sway_output_name(name: Option<&str>, pos: (i32, i32), tree: &Tree) -> Option<String> {
+    if let Some(name) = name.filter(|n| tree.output(n).is_some()) {
+        return Some(name.to_owned());
     }
-    let pos = info.logical_position.unwrap_or(info.location);
     tree.outputs.iter().find(|o| (o.rect.x as i32, o.rect.y as i32) == pos).map(|o| o.name.clone())
 }
 
-/// Physical pixels per logical pixel at `scale` `SCALE_UNIT`s.
-fn render_scale(scale: u32) -> f32 {
-    scale.max(1) as f32 / SCALE_UNIT as f32
+/// What surface `i` marks: the selected window and its workspace, or with no
+/// selection anywhere, sway's focused workspace.
+fn view(scene: &Scene, selected: Option<Sel>, i: usize) -> View {
+    let window = selected.filter(|sel| sel.surface == i).map(|sel| sel.window);
+    let workspace = match selected {
+        Some(_) => window.map(|w| scene.windows[w].workspace),
+        None => scene.selected_workspace(None),
+    };
+    View { selected: window, selected_workspace: workspace }
 }
 
 /// Render scale and buffer size for a logical size at `scale` `SCALE_UNIT`s,
 /// rounded half away from zero as `wp_fractional_scale_v1` specifies.
 fn buffer_size((w, h): (u32, u32), scale: u32) -> (f32, (u32, u32)) {
-    let f = render_scale(scale);
+    let f = scale.max(1) as f32 / SCALE_UNIT as f32;
     (f, ((w as f32 * f).round() as u32, (h as f32 * f).round() as u32))
 }
 
@@ -239,35 +253,41 @@ fn key_of(event: &KeyEvent) -> Option<Key<'_>> {
 }
 
 impl App {
+    /// The app, and its renderer loading on a thread meanwhile.
     fn new(
+        conn: &Connection,
         globals: &GlobalList,
         qh: &QueueHandle<Self>,
         loop_handle: LoopHandle<'static, Self>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, JoinHandle<Renderer>)> {
         let mut ipc = Ipc::connect()?;
         let tree = ipc.get_tree()?;
         let config = Config::load(ipc.config_path().ok().as_deref());
         let compositor = CompositorState::bind(globals, qh).context("wl_compositor")?;
         let viewporter: Option<WpViewporter> = globals.bind(qh, 1..=1, NoEvents).ok();
-        let capture = if config.thumbnails {
-            Capture::new(globals, qh, compositor.wl_compositor(), viewporter.as_ref())
-        } else {
-            None
-        };
+        // Thumbnails are shown on subsurfaces, scaled by a viewport.
+        let subcompositor = config
+            .thumbnails
+            .then(|| SubcompositorState::bind(compositor.wl_compositor().clone(), globals, qh).ok())
+            .flatten()
+            .filter(|_| viewporter.is_some());
+        let capture = subcompositor.as_ref().and_then(|_| Capture::new(globals, qh));
         let shm = Shm::bind(globals, qh).context("wl_shm")?;
-        Ok(App {
+        let fonts = std::thread::spawn(move || Renderer::new(config));
+        let app = App {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
             output_state: OutputState::new(globals, qh),
             compositor,
             layer_shell: LayerShell::bind(globals, qh).context("wlr-layer-shell")?,
-            fractional_scale: globals.bind(qh, 1..=1, NoEvents).ok().filter(|_| viewporter.is_some()),
+            fractional_scale: globals.bind(qh, 1..=1, NoEvents).ok(),
             viewporter,
+            subcompositor,
             pool: SlotPool::new(1920 * 1080 * 4, &shm)?,
             shm,
+            conn: conn.clone(),
             qh: qh.clone(),
             loop_handle,
-            loading: Some(std::thread::spawn(move || Renderer::new(config))),
             renderer: None,
             capture,
             ipc,
@@ -280,17 +300,16 @@ impl App {
             pointer_surface: None,
             tree_dirty: false,
             exit: false,
-        })
+        };
+        Ok((app, fonts))
     }
 
     /// One fullscreen overlay per output.
-    fn create_surfaces(&mut self) -> Result<()> {
-        if let Some(loading) = self.loading.take() {
-            self.renderer = Some(loading.join().map_err(|_| anyhow!("loading fonts failed"))?);
-        }
+    fn create_surfaces(&mut self) {
         for wl_output in self.output_state.outputs() {
             let Some(info) = self.output_state.info(&wl_output) else { continue };
-            let Some(name) = sway_output_name(&info, &self.tree) else { continue };
+            let pos = info.logical_position.unwrap_or(info.location);
+            let Some(name) = sway_output_name(info.name.as_deref(), pos, &self.tree) else { continue };
             let surface = self.compositor.create_surface(&self.qh);
             let layer = self.layer_shell.create_layer_surface(
                 &self.qh,
@@ -330,28 +349,41 @@ impl App {
                 frame_pending: false,
             });
         }
-        Ok(())
     }
 
     fn scenes(&self) -> Vec<&Scene> {
         self.surfaces.iter().map(|s| &s.scene).collect()
     }
 
-    /// Lays out every configured surface again, keeping the selection by window.
+    /// Lays out every configured surface again, keeping the selection by
+    /// window, and redraws those that changed.
     fn rebuild(&mut self) {
-        let selected_id = self.selected.map(|s| self.surfaces[s.surface].scene.windows[s.window].id);
-        for s in &mut self.surfaces {
+        let old = self.selected;
+        let selected_id = old.map(|s| self.surfaces[s.surface].scene.windows[s.window].id);
+        let mut changed = Vec::new();
+        for (i, s) in self.surfaces.iter_mut().enumerate() {
             let Some((w, h)) = s.size else { continue };
-            s.scene =
+            let scene =
                 self.tree.output(&s.output).map(|o| layout::build(o, w as f32, h as f32)).unwrap_or_default();
+            if scene != s.scene {
+                s.scene = scene;
+                changed.push(i);
+            }
         }
         let scenes = self.scenes();
         self.selected =
             selected_id.and_then(|id| input::find(&scenes, id)).or_else(|| input::focused(&scenes));
-        for i in 0..self.surfaces.len() {
+        for &i in &changed {
             self.sync_tiles(i);
         }
-        self.redraw_all();
+        // A selection that moved changes what every surface marks.
+        if self.selected == old {
+            for i in changed {
+                self.redraw(i);
+            }
+        } else {
+            self.redraw_all();
+        }
         self.capture_windows();
     }
 
@@ -391,37 +423,20 @@ impl App {
         let Some((w, h)) = s.size else { return };
         let Some(renderer) = &mut self.renderer else { return };
         let (scale, (pw, ph)) = buffer_size((w, h), s.scale);
-        let selected = self.selected.filter(|sel| sel.surface == i).map(|sel| sel.window);
-        // With a selection, only its workspace is marked; without, sway's focused one.
-        let selected_workspace = match self.selected {
-            Some(_) => selected.map(|w| s.scene.windows[w].workspace),
-            None => s.scene.selected_workspace(None),
-        };
-        let view = View { selected, selected_workspace };
-        let tiled = self.capture.is_some();
-        let pix = if tiled {
+        let view = view(&s.scene, self.selected, i);
+        let pix = if self.capture.is_some() {
             renderer.draw_workspaces(&s.scene, &view, pw, ph, scale)
         } else {
             renderer.draw(&s.scene, &view, pw, ph, scale)
         };
         let Some(pix) = pix else { return };
-
-        // Tiles are synchronized subsurfaces: what is committed here shows
-        // with the overlay's next commit.
-        for (k, win) in s.scene.windows.iter().enumerate().filter(|_| tiled) {
-            let Some(tile) = s.tiles.get(&win.id) else { continue };
-            let (tw, th) = tile.size();
-            let size = ((tw as f32 * scale).round() as u32, (th as f32 * scale).round() as u32);
-            let Some(pix) = renderer.draw_tile(win, selected == Some(k), tile.has_frame(), size, scale)
-            else {
-                continue;
-            };
-            let (surface, viewport) = tile.deco();
-            viewport.set_destination(tw, th);
-            if let Err(e) = attach(&mut self.pool, surface, &pix) {
-                return warn(e);
+        for (k, win) in s.scene.windows.iter().enumerate() {
+            if let Some(tile) = s.tiles.get_mut(&win.id)
+                && let Err(e) =
+                    tile.draw_deco(renderer, &mut self.pool, win, view.selected == Some(k), s.scale)
+            {
+                warn(e.context("window overlay"));
             }
-            surface.commit();
         }
 
         let surface = s.layer.wl_surface();
@@ -435,8 +450,13 @@ impl App {
             return warn(e);
         }
         s.layer.commit();
+        s.tiles.values_mut().for_each(Tile::committed);
         s.dirty = false;
         s.frame_pending = true;
+        // Without waiting for the other surfaces to be drawn.
+        if let Err(e) = self.conn.flush() {
+            warn(format_args!("flush: {e}"));
+        }
     }
 
     fn surface_index(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
@@ -747,8 +767,8 @@ impl ProvidesRegistryState for App {
 
 smithay_client_toolkit::delegate_dispatch2!(App);
 
-/// User data for the fractional-scale manager, viewporter and viewports,
-/// none of which send events.
+/// User data for objects that send no events: the viewporter, viewports,
+/// the fractional-scale manager, and the capture managers and sources.
 struct NoEvents;
 
 impl<I: Proxy> Dispatch2<I, App> for NoEvents {
@@ -784,5 +804,29 @@ mod tests {
         assert_eq!(buffer_size((1920, 1080), 240), (2.0, (3840, 2160)));
         // 1.25× of an odd size rounds up.
         assert_eq!(buffer_size((1001, 3), 150).1, (1251, 4));
+    }
+
+    #[test]
+    fn outputs_pair_by_name_then_position() {
+        let tree = crate::model::tests::tree();
+        assert_eq!(sway_output_name(Some("HEADLESS-1"), (500, 500), &tree).as_deref(), Some("HEADLESS-1"));
+        assert_eq!(sway_output_name(Some("DP-9"), (0, 0), &tree).as_deref(), Some("HEADLESS-1"));
+        assert_eq!(sway_output_name(None, (0, 0), &tree).as_deref(), Some("HEADLESS-1"));
+        assert_eq!(sway_output_name(None, (1920, 0), &tree), None);
+    }
+
+    #[test]
+    fn surfaces_mark_the_selection_or_else_the_focus() {
+        let tree = crate::model::tests::tree();
+        let scene = layout::build(&tree.outputs[0], 1920.0, 1080.0);
+        let slack = scene.windows.iter().position(|w| w.app == "Slack").unwrap();
+        let v = view(&scene, Some(Sel { surface: 0, window: slack }), 0);
+        assert_eq!((v.selected, v.selected_workspace), (Some(slack), Some(1)));
+        // Selected elsewhere: nothing marked here.
+        let v = view(&scene, Some(Sel { surface: 1, window: slack }), 0);
+        assert_eq!((v.selected, v.selected_workspace), (None, None));
+        // Nothing selected: sway's focused workspace, "1" in the fixture.
+        let v = view(&scene, None, 0);
+        assert_eq!((v.selected, v.selected_workspace), (None, Some(0)));
     }
 }

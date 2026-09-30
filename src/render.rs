@@ -1,4 +1,5 @@
-//! Draws a `Scene` into a pixmap with tiny-skia and cosmic-text.
+//! Draws a `Scene` into a pixmap with tiny-skia and cosmic-text: whole, or,
+//! for thumbnails, its workspaces and one overlay per window.
 
 use cosmic_text::{
     Attrs, Buffer, Ellipsize, EllipsizeHeightLimit, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
@@ -22,7 +23,7 @@ const SELECTED_TINT: u8 = 0x80;
 const PAD: f32 = 6.0;
 const WINDOW_RADIUS: f32 = 4.0;
 /// The border's outer edge is rounder than the window by half its width, up
-/// to 1; a thumbnail is cut to this, so it does not show past the border.
+/// to 1; outside this, the overlay covers a thumbnail's corners.
 const THUMB_RADIUS: f32 = WINDOW_RADIUS + 1.0;
 const LINE_HEIGHT: f32 = 1.3;
 const MIN_TEXT_WIDTH: f32 = 12.0;
@@ -48,6 +49,14 @@ impl Font {
     fn style(&self, size: f32, bold: bool, color: Rgba) -> TextStyle<'_> {
         TextStyle { family: &self.family, size, bold, color }
     }
+}
+
+/// What a window's overlay from `Renderer::draw_tile` goes over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Behind {
+    /// Nothing yet: the overlay is the whole box.
+    Nothing,
+    Thumbnail,
 }
 
 #[derive(Debug)]
@@ -81,7 +90,7 @@ impl Renderer {
     pub fn draw(&mut self, scene: &Scene, view: &View, w: u32, h: u32, scale: f32) -> Option<Pixmap> {
         let mut pix = self.draw_workspaces(scene, view, w, h, scale)?;
         for (i, win) in scene.windows.iter().enumerate() {
-            self.draw_window(&mut pix, win, win.rect, view.selected == Some(i), false, scale);
+            self.draw_window(&mut pix, win, win.rect, view.selected == Some(i), Behind::Nothing, scale);
         }
         Some(pix)
     }
@@ -126,13 +135,13 @@ impl Renderer {
         &mut self,
         win: &WinItem,
         selected: bool,
-        over_thumbnail: bool,
+        behind: Behind,
         (w, h): (u32, u32),
         scale: f32,
     ) -> Option<Pixmap> {
         let mut pix = Pixmap::new(w, h)?;
         let r = Rect::new(0.0, 0.0, w as f32 / scale, h as f32 / scale);
-        self.draw_window(&mut pix, win, r, selected, over_thumbnail, scale);
+        self.draw_window(&mut pix, win, r, selected, behind, scale);
         Some(pix)
     }
 
@@ -143,7 +152,7 @@ impl Renderer {
         win: &WinItem,
         r: Rect,
         selected: bool,
-        over_thumbnail: bool,
+        behind: Behind,
         scale: f32,
     ) {
         let (fonts, colors) = (&self.fonts, &self.colors);
@@ -166,7 +175,7 @@ impl Renderer {
         let second = second.filter(|_| inner.h >= app.line_height() + title.line_height());
         let text_h = app.line_height() + second.as_ref().map_or(0.0, |_| title.line_height());
 
-        if over_thumbnail {
+        if behind == Behind::Thumbnail {
             corners(pix, r, THUMB_RADIUS, colors.workspace.fill, t);
             if selected {
                 fill(pix, r, (THUMB_RADIUS, THUMB_RADIUS), class.background.fade(SELECTED_TINT), t);
@@ -349,18 +358,18 @@ mod tests {
         [p.red(), p.green(), p.blue(), p.alpha()]
     }
 
-    fn tile(selected: bool, over_thumbnail: bool) -> Pixmap {
+    fn tile(selected: bool, behind: Behind) -> Pixmap {
         let mut r = Renderer::new(Config::load(None));
-        r.draw_tile(&win("btop", "Alacritty", vec![]), selected, over_thumbnail, (200, 120), 1.0).unwrap()
+        r.draw_tile(&win("btop", "Alacritty", vec![]), selected, behind, (200, 120), 1.0).unwrap()
     }
 
     #[test]
     fn tile_over_a_thumbnail_leaves_it_visible() {
         let below_text = (100, 100);
-        assert_eq!(rgba(&tile(false, false), below_text)[3], 255);
-        assert_eq!(rgba(&tile(false, true), below_text)[3], 0);
+        assert_eq!(rgba(&tile(false, Behind::Nothing), below_text)[3], 255);
+        assert_eq!(rgba(&tile(false, Behind::Thumbnail), below_text)[3], 0);
         // The selected one is tinted, half see-through.
-        let tinted = rgba(&tile(true, true), below_text)[3];
+        let tinted = rgba(&tile(true, Behind::Thumbnail), below_text)[3];
         assert!((0x70..=0x90).contains(&tinted), "tint alpha {tinted}");
     }
 
@@ -368,10 +377,10 @@ mod tests {
     fn tile_corners_take_the_workspace_color() {
         let fill = Config::load(None).colors.workspace.fill.0.to_be_bytes();
         for corner in [(0, 0), (199, 0), (0, 119), (199, 119)] {
-            assert_eq!(rgba(&tile(false, true), corner), fill, "{corner:?}");
+            assert_eq!(rgba(&tile(false, Behind::Thumbnail), corner), fill, "{corner:?}");
         }
         // Without a thumbnail, the rounded box shows the surface below.
-        assert_eq!(rgba(&tile(false, false), (0, 0))[3], 0);
+        assert_eq!(rgba(&tile(false, Behind::Nothing), (0, 0))[3], 0);
     }
 
     #[test]
