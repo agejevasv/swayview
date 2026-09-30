@@ -15,8 +15,6 @@ use crate::model::Rect;
 
 /// Alpha of the title line relative to the app line.
 const TITLE_FADE: u8 = 0xb0;
-/// Darkens a thumbnail under the text lines.
-const SHADE: Rgba = Rgba(0x000000a0);
 /// Alpha of the selected window's color over its thumbnail.
 const SELECTED_TINT: u8 = 0x80;
 
@@ -39,9 +37,16 @@ struct TextStyle<'a> {
     color: Rgba,
 }
 
-impl TextStyle<'_> {
+impl<'a> TextStyle<'a> {
     fn line_height(&self) -> f32 {
         self.size * LINE_HEIGHT
+    }
+
+    /// For a line `line_h` high, at `scale`.
+    fn attrs(&self, line_h: f32, scale: f32) -> Attrs<'a> {
+        let weight = if self.bold { Weight::BOLD } else { Weight::NORMAL };
+        let metrics = Metrics::new(self.size * scale, line_h * scale);
+        Attrs::new().family(family(self.family)).weight(weight).color(self.color.into()).metrics(metrics)
     }
 }
 
@@ -109,7 +114,7 @@ impl Renderer {
         pix.fill(colors.backdrop.into());
         let t = Transform::from_scale(scale, scale);
         let output_name = fonts.title.style(OUTPUT_LABEL_SIZE, false, colors.output_name);
-        self.text.draw(&mut pix, &scene.output_name, scene.output_label, output_name, scale);
+        self.text.draw(&mut pix, &[(&scene.output_name, output_name)], scene.output_label, scale);
 
         let c = &colors.workspace;
         for (i, ws) in scene.workspaces.iter().enumerate() {
@@ -123,13 +128,13 @@ impl Renderer {
             };
             fill(&mut pix, ws.rect, (6.0, 6.0), c.fill, t);
             let r = Rect::new(ws.header.x + 2.0, ws.header.y, ws.header.w - 4.0, HEADER);
-            self.text.draw(&mut pix, &ws.name, r, fonts.app.style(WS_LABEL_SIZE, true, label), scale);
+            self.text.draw(&mut pix, &[(&ws.name, fonts.app.style(WS_LABEL_SIZE, true, label))], r, scale);
         }
         Some(pix)
     }
 
     /// Window `win` alone, filling a `w`×`h` pixmap. Over a thumbnail, only
-    /// what goes on top of it: border, text, the shade under the text, the
+    /// what goes on top of it: border, text on a bar in the window color, the
     /// selected tint, and corners in the workspace color, which round it off.
     pub fn draw_tile(
         &mut self,
@@ -172,8 +177,8 @@ impl Renderer {
         let title = fonts.title.style(fonts.title.size, false, class.text.fade(TITLE_FADE));
         let has_text = inner.w >= MIN_TEXT_WIDTH && inner.h >= app.line_height();
         let (first, second) = lines(win);
-        let second = second.filter(|_| inner.h >= app.line_height() + title.line_height());
-        let text_h = app.line_height() + second.as_ref().map_or(0.0, |_| title.line_height());
+        // Over a thumbnail, the text takes one line, to hide as little of it as can be.
+        let one_line = app.line_height().max(title.line_height());
 
         if behind == Behind::Thumbnail {
             corners(pix, r, THUMB_RADIUS, colors.workspace.fill, t);
@@ -181,10 +186,10 @@ impl Renderer {
                 fill(pix, r, (THUMB_RADIUS, THUMB_RADIUS), class.background.fade(SELECTED_TINT), t);
             }
             if has_text {
-                let shade = Rect::new(r.x, r.y, r.w, (text_h + 2.0 * PAD).min(r.h));
-                // Square bottom corners, unless the shade covers the whole window.
-                let bottom = if shade.h < r.h { 0.0 } else { THUMB_RADIUS };
-                fill(pix, shade, (THUMB_RADIUS, bottom), SHADE, t);
+                let bar = Rect::new(r.x, r.y, r.w, (one_line + 2.0 * PAD).min(r.h));
+                // Square bottom corners, unless the bar covers the whole window.
+                let bottom = if bar.h < r.h { 0.0 } else { THUMB_RADIUS };
+                fill(pix, bar, (THUMB_RADIUS, bottom), class.background, t);
             }
         } else {
             fill(pix, r, rounded, class.background, t);
@@ -194,26 +199,33 @@ impl Renderer {
         if !has_text {
             return;
         }
-        let line = Rect::new(inner.x, inner.y, inner.w, app.line_height());
-        self.text.draw(pix, first, line, app, scale);
-        if let Some(second) = second {
+        if behind == Behind::Thumbnail {
+            let rest = second.map(|s| format!(": {s}"));
+            let spans: Vec<_> =
+                [(first, app)].into_iter().chain(rest.as_deref().map(|s| (s, title))).collect();
+            self.text.draw(pix, &spans, Rect::new(inner.x, inner.y, inner.w, one_line), scale);
+            return;
+        }
+        self.text.draw(pix, &[(first, app)], Rect::new(inner.x, inner.y, inner.w, app.line_height()), scale);
+        if let Some(second) = second.filter(|_| inner.h >= app.line_height() + title.line_height()) {
             let line = Rect::new(inner.x, inner.y + app.line_height(), inner.w, title.line_height());
-            self.text.draw(pix, &second, line, title, scale);
+            self.text.draw(pix, &[(&second, title)], line, scale);
         }
     }
 }
 
 impl Text {
-    /// Single line of text, vertically centered in `r`, ellipsized to its width.
-    fn draw(&mut self, pix: &mut Pixmap, s: &str, r: Rect, style: TextStyle<'_>, scale: f32) {
-        let line_h = style.line_height();
+    /// One line of text, each part in its style, vertically centered in `r`,
+    /// ellipsized to its width.
+    fn draw(&mut self, pix: &mut Pixmap, parts: &[(&str, TextStyle<'_>)], r: Rect, scale: f32) {
+        let Some(&(_, style)) = parts.first() else { return };
+        let line_h = parts.iter().map(|(_, s)| s.line_height()).fold(0.0, f32::max);
         let mut buf = Buffer::new(&mut self.fonts, Metrics::new(style.size * scale, line_h * scale));
         buf.set_wrap(Wrap::None);
         buf.set_ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
         buf.set_size(Some(r.w * scale), Some(line_h * scale));
-        let weight = if style.bold { Weight::BOLD } else { Weight::NORMAL };
-        let attrs = Attrs::new().family(family(style.family)).weight(weight);
-        buf.set_text(s, &attrs, Shaping::Advanced, None);
+        let spans = parts.iter().map(|(text, s)| (*text, s.attrs(line_h, scale)));
+        buf.set_rich_text(spans, &style.attrs(line_h, scale), Shaping::Advanced, None);
 
         let origin = ((r.x * scale).round() as i32, ((r.y + (r.h - line_h) / 2.0) * scale).round() as i32);
         let (pw, ph) = (pix.width() as i32, pix.height() as i32);
@@ -371,6 +383,17 @@ mod tests {
         // The selected one is tinted, half see-through.
         let tinted = rgba(&tile(true, Behind::Thumbnail), below_text)[3];
         assert!((0x70..=0x90).contains(&tinted), "tint alpha {tinted}");
+    }
+
+    #[test]
+    fn text_sits_on_a_bar_in_the_window_color() {
+        let colors = Config::load(None).colors.window;
+        let beside_text = (190, 6);
+        let bytes = |c: Rgba| c.0.to_be_bytes();
+        assert_eq!(rgba(&tile(false, Behind::Thumbnail), beside_text), bytes(colors.normal.background));
+        assert_eq!(rgba(&tile(true, Behind::Thumbnail), beside_text), bytes(colors.selected.background));
+        // One line: the bar ends above where a title line would start.
+        assert_eq!(rgba(&tile(false, Behind::Thumbnail), (100, 34))[3], 0);
     }
 
     #[test]
