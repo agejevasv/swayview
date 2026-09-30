@@ -1,9 +1,9 @@
 # swayview
 
-A workspace overview for sway. Every workspace is shown as a small copy of your
-screen, with windows labelled by app and title. It reads the layout live from
-sway, with no daemon. On sway 1.12 and later, windows also show their
-contents, live.
+A workspace overview for sway. Each display shows its own workspaces, every one
+as a small copy of the screen, with windows labelled by app and title. It reads
+the layout live from sway, with no daemon. On sway 1.12 and later, windows also
+show their contents, live.
 
 ![swayview](.github/screenshot.png)
 
