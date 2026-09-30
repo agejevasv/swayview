@@ -1,15 +1,10 @@
 //! Draws a `Scene` into a pixmap with tiny-skia and cosmic-text.
 
-use std::collections::HashMap;
-
 use cosmic_text::{
     Attrs, Buffer, Ellipsize, EllipsizeHeightLimit, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
     Wrap,
 };
-use tiny_skia::{
-    FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PixmapPaint, PremultipliedColorU8,
-    SpreadMode, Stroke, Transform,
-};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
 use crate::color::Rgba;
 use crate::config::{Colors, Config, Font, Fonts};
@@ -27,7 +22,7 @@ const SELECTED_TINT: u8 = 0x80;
 const PAD: f32 = 6.0;
 const WINDOW_RADIUS: f32 = 4.0;
 /// The border's outer edge is rounder than the window by half its width, up
-/// to 1; drawn with this, a thumbnail does not show past the border's corners.
+/// to 1; a thumbnail is cut to this, so it does not show past the border.
 const THUMB_RADIUS: f32 = WINDOW_RADIUS + 1.0;
 const LINE_HEIGHT: f32 = 1.3;
 const MIN_TEXT_WIDTH: f32 = 12.0;
@@ -56,44 +51,10 @@ impl Font {
 }
 
 #[derive(Debug)]
-pub struct Thumb {
-    source: Pixmap,
-    /// `source` made to fit its window's box, see `fit`.
-    fitted: Option<Pixmap>,
-}
-
-impl Thumb {
-    pub fn new(source: Pixmap) -> Self {
-        Thumb { source, fitted: None }
-    }
-
-    /// Scales the thumbnail for a window drawn in `r` at `scale`, unless it
-    /// already is. Scaling is slow, so `Renderer::draw` only copies the result.
-    pub fn fit(&mut self, r: Rect, scale: f32) {
-        let (_, _, w, h) = snap(r, scale);
-        if self.fitted_to(w, h).is_some() {
-            return;
-        }
-        self.fitted = Pixmap::new(w, h).map(|mut pix| {
-            fill_cover(&mut pix, &self.source, THUMB_RADIUS * scale);
-            pix
-        });
-    }
-
-    fn fitted_to(&self, w: u32, h: u32) -> Option<&Pixmap> {
-        self.fitted.as_ref().filter(|f| (f.width(), f.height()) == (w, h))
-    }
-}
-
-/// Window contents by `WinItem::toplevel`.
-pub type Thumbs = HashMap<String, Thumb>;
-
-#[derive(Debug)]
-pub struct View<'a> {
+pub struct View {
     /// The selected window, if it is on this scene.
     pub selected: Option<usize>,
     pub selected_workspace: Option<usize>,
-    pub thumbs: &'a Thumbs,
 }
 
 pub struct Renderer {
@@ -117,7 +78,23 @@ impl Renderer {
     }
 
     /// Renders at `scale` physical pixels per logical pixel; `None` if `w` or `h` is 0.
-    pub fn draw(&mut self, scene: &Scene, view: &View<'_>, w: u32, h: u32, scale: f32) -> Option<Pixmap> {
+    pub fn draw(&mut self, scene: &Scene, view: &View, w: u32, h: u32, scale: f32) -> Option<Pixmap> {
+        let mut pix = self.draw_workspaces(scene, view, w, h, scale)?;
+        for (i, win) in scene.windows.iter().enumerate() {
+            self.draw_window(&mut pix, win, win.rect, view.selected == Some(i), false, scale);
+        }
+        Some(pix)
+    }
+
+    /// Like `draw`, without the windows, which are drawn with `draw_tile`.
+    pub fn draw_workspaces(
+        &mut self,
+        scene: &Scene,
+        view: &View,
+        w: u32,
+        h: u32,
+        scale: f32,
+    ) -> Option<Pixmap> {
         let mut pix = Pixmap::new(w, h)?;
         let (fonts, colors) = (&self.fonts, &self.colors);
         pix.fill(colors.backdrop.into());
@@ -139,58 +116,81 @@ impl Renderer {
             let r = Rect::new(ws.header.x + 2.0, ws.header.y, ws.header.w - 4.0, HEADER);
             self.text.draw(&mut pix, &ws.name, r, fonts.app.style(WS_LABEL_SIZE, true, label), scale);
         }
-
-        for (i, win) in scene.windows.iter().enumerate() {
-            let selected = view.selected == Some(i);
-            let class = if selected {
-                colors.window.selected
-            } else if win.urgent {
-                colors.window.urgent
-            } else {
-                colors.window.normal
-            };
-            let (border, width) = (class.border, if selected { 2.0 } else { 1.0 });
-            let rounded = (WINDOW_RADIUS, WINDOW_RADIUS);
-            fill(&mut pix, win.rect, rounded, class.background, t);
-
-            let inner = win.rect.inset(PAD);
-            let app = fonts.app.style(fonts.app.size, true, class.text);
-            let title = fonts.title.style(fonts.title.size, false, class.text.fade(TITLE_FADE));
-            let has_text = inner.w >= MIN_TEXT_WIDTH && inner.h >= app.line_height();
-            let (first, second) = lines(win);
-            let second = second.filter(|_| inner.h >= app.line_height() + title.line_height());
-            let text_h = app.line_height() + second.as_ref().map_or(0.0, |_| title.line_height());
-
-            let thumb = win.toplevel.as_ref().and_then(|id| view.thumbs.get(id));
-            let (x, y, w, h) = snap(win.rect, scale);
-            // Left out if not fitted to this size; `Thumb::fit` is the caller's job.
-            if let Some(fitted) = thumb.and_then(|t| t.fitted_to(w, h)) {
-                pix.draw_pixmap(x, y, fitted.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-                if selected {
-                    let tint = class.background.fade(SELECTED_TINT);
-                    fill(&mut pix, win.rect, (THUMB_RADIUS, THUMB_RADIUS), tint, t);
-                }
-                if has_text {
-                    let r = win.rect;
-                    let shade = Rect::new(r.x, r.y, r.w, (text_h + 2.0 * PAD).min(r.h));
-                    // Square bottom corners, unless the shade covers the whole window.
-                    let bottom = if shade.h < r.h { 0.0 } else { THUMB_RADIUS };
-                    fill(&mut pix, shade, (THUMB_RADIUS, bottom), SHADE, t);
-                }
-            }
-            stroke(&mut pix, win.rect, rounded, border, width, t);
-
-            if !has_text {
-                continue;
-            }
-            let r = Rect::new(inner.x, inner.y, inner.w, app.line_height());
-            self.text.draw(&mut pix, first, r, app, scale);
-            if let Some(second) = second {
-                let r = Rect::new(inner.x, inner.y + app.line_height(), inner.w, title.line_height());
-                self.text.draw(&mut pix, &second, r, title, scale);
-            }
-        }
         Some(pix)
+    }
+
+    /// Window `win` alone, filling a `w`×`h` pixmap. Over a thumbnail, only
+    /// what goes on top of it: border, text, the shade under the text, the
+    /// selected tint, and corners in the workspace color, which round it off.
+    pub fn draw_tile(
+        &mut self,
+        win: &WinItem,
+        selected: bool,
+        over_thumbnail: bool,
+        (w, h): (u32, u32),
+        scale: f32,
+    ) -> Option<Pixmap> {
+        let mut pix = Pixmap::new(w, h)?;
+        let r = Rect::new(0.0, 0.0, w as f32 / scale, h as f32 / scale);
+        self.draw_window(&mut pix, win, r, selected, over_thumbnail, scale);
+        Some(pix)
+    }
+
+    /// Draws `win` in `r`.
+    fn draw_window(
+        &mut self,
+        pix: &mut Pixmap,
+        win: &WinItem,
+        r: Rect,
+        selected: bool,
+        over_thumbnail: bool,
+        scale: f32,
+    ) {
+        let (fonts, colors) = (&self.fonts, &self.colors);
+        let t = Transform::from_scale(scale, scale);
+        let class = if selected {
+            colors.window.selected
+        } else if win.urgent {
+            colors.window.urgent
+        } else {
+            colors.window.normal
+        };
+        let (border, width) = (class.border, if selected { 2.0 } else { 1.0 });
+        let rounded = (WINDOW_RADIUS, WINDOW_RADIUS);
+
+        let inner = r.inset(PAD);
+        let app = fonts.app.style(fonts.app.size, true, class.text);
+        let title = fonts.title.style(fonts.title.size, false, class.text.fade(TITLE_FADE));
+        let has_text = inner.w >= MIN_TEXT_WIDTH && inner.h >= app.line_height();
+        let (first, second) = lines(win);
+        let second = second.filter(|_| inner.h >= app.line_height() + title.line_height());
+        let text_h = app.line_height() + second.as_ref().map_or(0.0, |_| title.line_height());
+
+        if over_thumbnail {
+            corners(pix, r, THUMB_RADIUS, colors.workspace.fill, t);
+            if selected {
+                fill(pix, r, (THUMB_RADIUS, THUMB_RADIUS), class.background.fade(SELECTED_TINT), t);
+            }
+            if has_text {
+                let shade = Rect::new(r.x, r.y, r.w, (text_h + 2.0 * PAD).min(r.h));
+                // Square bottom corners, unless the shade covers the whole window.
+                let bottom = if shade.h < r.h { 0.0 } else { THUMB_RADIUS };
+                fill(pix, shade, (THUMB_RADIUS, bottom), SHADE, t);
+            }
+        } else {
+            fill(pix, r, rounded, class.background, t);
+        }
+        stroke(pix, r, rounded, border, width, t);
+
+        if !has_text {
+            return;
+        }
+        let line = Rect::new(inner.x, inner.y, inner.w, app.line_height());
+        self.text.draw(pix, first, line, app, scale);
+        if let Some(second) = second {
+            let line = Rect::new(inner.x, inner.y + app.line_height(), inner.w, title.line_height());
+            self.text.draw(pix, &second, line, title, scale);
+        }
     }
 }
 
@@ -291,26 +291,18 @@ fn fill(pix: &mut Pixmap, r: Rect, radii: (f32, f32), color: Rgba, t: Transform)
     }
 }
 
-/// `r` at `scale`, in whole pixels: x, y, width, height.
-fn snap(r: Rect, scale: f32) -> (i32, i32, u32, u32) {
-    let (x0, y0) = ((r.x * scale).round(), (r.y * scale).round());
-    let (x1, y1) = (((r.x + r.w) * scale).round(), ((r.y + r.h) * scale).round());
-    (x0 as i32, y0 as i32, (x1 - x0).max(0.0) as u32, (y1 - y0).max(0.0) as u32)
-}
-
-/// Fills `pix` with `source`, scaled to cover it and centered; the overflow is cut off.
-fn fill_cover(pix: &mut Pixmap, source: &Pixmap, radius: f32) {
-    let r = Rect::new(0.0, 0.0, pix.width() as f32, pix.height() as f32);
-    let (sw, sh) = (source.width() as f32, source.height() as f32);
-    let s = (r.w / sw).max(r.h / sh);
-    let placed = Transform::from_row(s, 0.0, 0.0, s, r.x + (r.w - sw * s) / 2.0, r.y + (r.h - sh * s) / 2.0);
-    let paint = Paint {
-        shader: Pattern::new(source.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, 1.0, placed),
-        anti_alias: true,
-        ..Paint::default()
+/// Fills what lies in `r` but outside its corners rounded by `radius`.
+fn corners(pix: &mut Pixmap, r: Rect, radius: f32, color: Rgba, t: Transform) {
+    let (Some(rect), Some(rounded)) =
+        (tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h), rounded(r, (radius, radius)))
+    else {
+        return;
     };
-    if let Some(path) = rounded(r, (radius, radius)) {
-        pix.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    let mut pb = PathBuilder::new();
+    pb.push_rect(rect);
+    pb.push_path(&rounded);
+    if let Some(path) = pb.finish() {
+        pix.fill_path(&path, &paint(color), FillRule::EvenOdd, t, None);
     }
 }
 
@@ -352,87 +344,40 @@ mod tests {
         assert_eq!(lines(&win("", "Alacritty", vec!["float"])), ("Alacritty", Some("float".into())));
     }
 
-    const RED: [u8; 4] = [255, 0, 0, 255];
-
-    /// The fixture's first window with a solid red thumbnail, fitted at `fit_scale`.
-    fn scene_with_thumb(fit_scale: Option<f32>) -> (Scene, Thumbs) {
-        let mut scene = crate::layout::build(&crate::model::tests::tree().outputs[0], 800.0, 450.0);
-        scene.windows[0].toplevel = Some("a".into());
-        let mut source = Pixmap::new(40, 30).unwrap();
-        source.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
-        let mut thumb = Thumb::new(source);
-        if let Some(scale) = fit_scale {
-            thumb.fit(scene.windows[0].rect, scale);
-        }
-        (scene, Thumbs::from([("a".into(), thumb)]))
-    }
-
-    fn render(scene: &Scene, thumbs: &Thumbs, selected: Option<usize>, scale: f32) -> Pixmap {
-        let view = View { selected, selected_workspace: None, thumbs };
-        let (w, h) = ((scene.size.0 * scale) as u32, (scene.size.1 * scale) as u32);
-        Renderer::new(Config::load(None)).draw(scene, &view, w, h, scale).unwrap()
-    }
-
-    /// A point in the lower middle of window 0, below the text, at `scale`.
-    fn below_text(scene: &Scene, scale: f32) -> (u32, u32) {
-        let r = scene.windows[0].rect;
-        (((r.x + r.w / 2.0) * scale) as u32, ((r.y + r.h * 0.8) * scale) as u32)
-    }
-
     fn rgba(pix: &Pixmap, (x, y): (u32, u32)) -> [u8; 4] {
         let p = pix.pixel(x, y).unwrap();
         [p.red(), p.green(), p.blue(), p.alpha()]
     }
 
-    #[test]
-    fn thumbnail_drawn_only_when_fitted() {
-        let (scene, _) = scene_with_thumb(None);
-        let plain = render(&scene, &Thumbs::new(), None, 1.0);
-        let at = below_text(&scene, 1.0);
-        assert_ne!(rgba(&plain, at), RED);
+    fn tile(selected: bool, over_thumbnail: bool) -> Pixmap {
+        let mut r = Renderer::new(Config::load(None));
+        r.draw_tile(&win("btop", "Alacritty", vec![]), selected, over_thumbnail, (200, 120), 1.0).unwrap()
+    }
 
-        let (scene, thumbs) = scene_with_thumb(Some(1.0));
-        assert_eq!(rgba(&render(&scene, &thumbs, None, 1.0), at), RED);
-        // Not fitted, or fitted for another scale: a plain box.
-        for fit in [None, Some(2.0)] {
-            let (scene, thumbs) = scene_with_thumb(fit);
-            assert_eq!(render(&scene, &thumbs, None, 1.0).data(), plain.data(), "{fit:?}");
+    #[test]
+    fn tile_over_a_thumbnail_leaves_it_visible() {
+        let below_text = (100, 100);
+        assert_eq!(rgba(&tile(false, false), below_text)[3], 255);
+        assert_eq!(rgba(&tile(false, true), below_text)[3], 0);
+        // The selected one is tinted, half see-through.
+        let tinted = rgba(&tile(true, true), below_text)[3];
+        assert!((0x70..=0x90).contains(&tinted), "tint alpha {tinted}");
+    }
+
+    #[test]
+    fn tile_corners_take_the_workspace_color() {
+        let fill = Config::load(None).colors.workspace.fill.0.to_be_bytes();
+        for corner in [(0, 0), (199, 0), (0, 119), (199, 119)] {
+            assert_eq!(rgba(&tile(false, true), corner), fill, "{corner:?}");
         }
-    }
-
-    #[test]
-    fn selected_thumbnail_is_tinted() {
-        let (scene, thumbs) = scene_with_thumb(Some(1.0));
-        let tinted = rgba(&render(&scene, &thumbs, Some(0), 1.0), below_text(&scene, 1.0));
-        assert_ne!(tinted, RED);
-        assert!(tinted[0] > tinted[1] && tinted[0] > tinted[2], "still mostly red: {tinted:?}");
-    }
-
-    #[test]
-    fn thumbnail_stays_inside_the_border_corners() {
-        for (selected, scale) in [(None, 1.0), (None, 2.0), (Some(0), 1.5), (Some(0), 2.0)] {
-            let (scene, thumbs) = scene_with_thumb(Some(scale));
-            let with = render(&scene, &thumbs, selected, scale);
-            let without = render(&scene, &Thumbs::new(), selected, scale);
-            let (x, y, w, h) = snap(scene.windows[0].rect, scale);
-            let (x, y) = (x as u32, y as u32);
-            for corner in [(x, y), (x + w - 1, y), (x, y + h - 1), (x + w - 1, y + h - 1)] {
-                assert_eq!(rgba(&with, corner), rgba(&without, corner), "{corner:?} at {scale}");
-            }
-        }
-    }
-
-    #[test]
-    fn snapping_to_pixels() {
-        assert_eq!(snap(Rect::new(10.3, 20.7, 101.1, 60.3), 1.0), (10, 21, 101, 60));
-        assert_eq!(snap(Rect::new(10.3, 20.7, 101.1, 60.3), 1.5), (15, 31, 152, 91));
-        assert_eq!(snap(Rect::new(5.0, 5.0, 0.2, 0.2), 1.0).2, 0);
+        // Without a thumbnail, the rounded box shows the surface below.
+        assert_eq!(rgba(&tile(false, false), (0, 0))[3], 0);
     }
 
     #[test]
     fn zero_size_is_none_not_a_panic() {
         let mut r = Renderer::new(Config::load(None));
-        let view = View { selected: None, selected_workspace: None, thumbs: &Thumbs::new() };
+        let view = View { selected: None, selected_workspace: None };
         assert!(r.draw(&Scene::default(), &view, 0, 10, 1.0).is_none());
         assert!(r.draw(&Scene::default(), &view, 10, 10, 1.0).is_some());
     }

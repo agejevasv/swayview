@@ -86,7 +86,7 @@ impl Config {
         Config {
             fonts: Fonts { app: font(14.0), title: font(12.0) },
             colors: Colors::defaults(clients),
-            thumbnails: false,
+            thumbnails: true,
         }
     }
 
@@ -348,7 +348,7 @@ colors:
         let d = defaults();
         assert_eq!(c.fonts.title, Font { family: "Inter".into(), size: d.fonts.title.size });
         assert_eq!(c.fonts.app, d.fonts.app);
-        assert!(!c.thumbnails);
+        assert!(c.thumbnails);
         let (c, d) = (c.colors, d.colors);
         assert_eq!(c.backdrop, Rgba(0x000000cc));
         assert_eq!(c.workspace.selected, Rgba(0x00ffffff));
@@ -359,8 +359,8 @@ colors:
     }
 
     #[test]
-    fn thumbnails_can_be_turned_on() {
-        assert!(with_file("thumbnails", "thumbnails: true\n").thumbnails);
+    fn thumbnails_can_be_turned_off() {
+        assert!(!with_file("thumbnails", "thumbnails: false\n").thumbnails);
     }
 
     #[test]

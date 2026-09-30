@@ -6,8 +6,13 @@
 //! `wp_fractional_scale_v1` and `wp_viewporter`, integer otherwise.
 
 mod capture;
+mod tiles;
 
-use anyhow::{Context, Result, ensure};
+use std::collections::HashMap;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow, ensure};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -52,15 +57,20 @@ use wayland_protocols::wp::{
 use crate::config::Config;
 use crate::input::{self, Action, Key, Sel};
 use crate::layout::{self, Dir, Scene};
-use crate::model::{Focus, Tree};
-use crate::render::{Renderer, Thumbs, View};
+use crate::model::{ConId, Focus, Tree};
+use crate::render::{Renderer, View};
 use crate::sway::Ipc;
 use crate::warn;
 use capture::Capture;
+use tiles::Tile;
+use tiny_skia::Pixmap;
 
 const BTN_LEFT: u32 = 0x110;
 /// The fractional-scale protocol counts scale in 120ths: 120 is 1×, 180 is 1.5×.
 const SCALE_UNIT: u32 = 120;
+/// How long the overview waits for the windows' first frames before it shows
+/// up; windows still without one are drawn as boxes until theirs comes.
+const CAPTURE_WAIT: Duration = Duration::from_millis(200);
 
 struct Surf {
     layer: LayerSurface,
@@ -74,6 +84,8 @@ struct Surf {
     viewport: Option<WpViewport>,
     _fractional_scale: Option<WpFractionalScaleV1>,
     scene: Scene,
+    /// With thumbnails, one per window with room for it.
+    tiles: HashMap<ConId, Tile>,
     dirty: bool,
     /// A frame callback is outstanding; draw when it arrives.
     frame_pending: bool,
@@ -85,17 +97,19 @@ struct App {
     output_state: OutputState,
     compositor: CompositorState,
     layer_shell: LayerShell,
-    /// Both present, or fractional scaling is not used.
-    fractional_scale: Option<(WpFractionalScaleManagerV1, WpViewporter)>,
+    viewporter: Option<WpViewporter>,
+    /// Used only with a viewporter.
+    fractional_scale: Option<WpFractionalScaleManagerV1>,
     shm: Shm,
     pool: SlotPool,
     qh: QueueHandle<App>,
     /// For the key repeat timer.
     loop_handle: LoopHandle<'static, App>,
-    renderer: Renderer,
+    /// Loaded on a thread while the first frames are captured.
+    loading: Option<JoinHandle<Renderer>>,
+    renderer: Option<Renderer>,
     /// Present when thumbnails are on and the compositor can capture windows.
     capture: Option<Capture>,
-    thumbs: Thumbs,
     ipc: Ipc,
     tree: Tree,
     initial_focus: Option<Focus>,
@@ -116,10 +130,13 @@ pub fn run() -> Result<()> {
     let (globals, mut queue) = registry_queue_init(&conn)?;
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
     let mut app = App::new(&globals, &queue.handle(), event_loop.handle())?;
-    // Learn output names and positions before creating surfaces.
+    // Learn output names and positions, and the windows to capture.
     queue.roundtrip(&mut app)?;
-    app.create_surfaces();
-    ensure!(!app.surfaces.is_empty(), "no Wayland output matches one of sway's outputs");
+    if app.capture.is_some() {
+        // For what each window handle announced after its creation.
+        queue.roundtrip(&mut app)?;
+    }
+    app.capture_windows();
 
     WaylandSource::new(conn, queue).insert(event_loop.handle()).map_err(|e| e.error)?;
     event_loop
@@ -130,6 +147,16 @@ pub fn run() -> Result<()> {
             }
         })
         .map_err(|e| e.error)?;
+
+    let deadline = Instant::now() + CAPTURE_WAIT;
+    while !app.capture.as_ref().is_none_or(Capture::settled)
+        && let Some(left) = deadline.checked_duration_since(Instant::now())
+    {
+        event_loop.dispatch(left, &mut app)?;
+    }
+    app.create_surfaces()?;
+    ensure!(!app.surfaces.is_empty(), "no Wayland output matches one of sway's outputs");
+    app.start_live_updates();
 
     while !app.exit {
         event_loop.dispatch(None, &mut app)?;
@@ -179,6 +206,19 @@ fn buffer_size((w, h): (u32, u32), scale: u32) -> (f32, (u32, u32)) {
     (f, ((w as f32 * f).round() as u32, (h as f32 * f).round() as u32))
 }
 
+/// Copies `pix` into a new buffer and attaches it to `surface`, all damaged.
+fn attach(pool: &mut SlotPool, surface: &wl_surface::WlSurface, pix: &Pixmap) -> Result<()> {
+    let (w, h) = (pix.width() as i32, pix.height() as i32);
+    let (buffer, canvas) = pool.create_buffer(w, h, w * 4, wl_shm::Format::Argb8888).context("buffer")?;
+    // tiny-skia is premultiplied RGBA; ARGB8888 little-endian is BGRA in memory.
+    for (dst, src) in canvas.as_chunks_mut::<4>().0.iter_mut().zip(pix.data().as_chunks::<4>().0) {
+        *dst = [src[2], src[1], src[0], src[3]];
+    }
+    surface.damage_buffer(0, 0, w, h);
+    buffer.attach_to(surface).context("attach")?;
+    Ok(())
+}
+
 /// An integer output scale in `SCALE_UNIT`s.
 fn integer_scale(factor: i32) -> u32 {
     factor.max(1).unsigned_abs() * SCALE_UNIT
@@ -207,25 +247,29 @@ impl App {
         let mut ipc = Ipc::connect()?;
         let tree = ipc.get_tree()?;
         let config = Config::load(ipc.config_path().ok().as_deref());
-        let capture = if config.thumbnails { Capture::new(globals, qh) } else { None };
+        let compositor = CompositorState::bind(globals, qh).context("wl_compositor")?;
+        let viewporter: Option<WpViewporter> = globals.bind(qh, 1..=1, NoEvents).ok();
+        let capture = if config.thumbnails {
+            Capture::new(globals, qh, compositor.wl_compositor(), viewporter.as_ref())
+        } else {
+            None
+        };
         let shm = Shm::bind(globals, qh).context("wl_shm")?;
         Ok(App {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
             output_state: OutputState::new(globals, qh),
-            compositor: CompositorState::bind(globals, qh).context("wl_compositor")?,
+            compositor,
             layer_shell: LayerShell::bind(globals, qh).context("wlr-layer-shell")?,
-            fractional_scale: globals
-                .bind(qh, 1..=1, NoEvents)
-                .ok()
-                .zip(globals.bind(qh, 1..=1, NoEvents).ok()),
+            fractional_scale: globals.bind(qh, 1..=1, NoEvents).ok().filter(|_| viewporter.is_some()),
+            viewporter,
             pool: SlotPool::new(1920 * 1080 * 4, &shm)?,
             shm,
             qh: qh.clone(),
             loop_handle,
-            renderer: Renderer::new(config),
+            loading: Some(std::thread::spawn(move || Renderer::new(config))),
+            renderer: None,
             capture,
-            thumbs: Thumbs::new(),
             ipc,
             initial_focus: tree.focus(),
             tree,
@@ -240,7 +284,10 @@ impl App {
     }
 
     /// One fullscreen overlay per output.
-    fn create_surfaces(&mut self) {
+    fn create_surfaces(&mut self) -> Result<()> {
+        if let Some(loading) = self.loading.take() {
+            self.renderer = Some(loading.join().map_err(|_| anyhow!("loading fonts failed"))?);
+        }
         for wl_output in self.output_state.outputs() {
             let Some(info) = self.output_state.info(&wl_output) else { continue };
             let Some(name) = sway_output_name(&info, &self.tree) else { continue };
@@ -256,7 +303,9 @@ impl App {
             layer.set_exclusive_zone(-1);
             layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
             let surface = layer.wl_surface();
-            let (fractional_scale, viewport) = if let Some((manager, viewporter)) = &self.fractional_scale {
+            let (fractional_scale, viewport) = if let Some((manager, viewporter)) =
+                self.fractional_scale.as_ref().zip(self.viewporter.as_ref())
+            {
                 let data = FractionalScale(surface.clone());
                 (
                     Some(manager.get_fractional_scale(surface, &self.qh, data)),
@@ -276,10 +325,12 @@ impl App {
                 viewport,
                 _fractional_scale: fractional_scale,
                 scene: Scene::default(),
+                tiles: HashMap::new(),
                 dirty: false,
                 frame_pending: false,
             });
         }
+        Ok(())
     }
 
     fn scenes(&self) -> Vec<&Scene> {
@@ -297,6 +348,9 @@ impl App {
         let scenes = self.scenes();
         self.selected =
             selected_id.and_then(|id| input::find(&scenes, id)).or_else(|| input::focused(&scenes));
+        for i in 0..self.surfaces.len() {
+            self.sync_tiles(i);
+        }
         self.redraw_all();
         self.capture_windows();
     }
@@ -333,9 +387,9 @@ impl App {
     }
 
     fn draw(&mut self, i: usize) {
-        self.fit_thumbs();
         let s = &mut self.surfaces[i];
         let Some((w, h)) = s.size else { return };
+        let Some(renderer) = &mut self.renderer else { return };
         let (scale, (pw, ph)) = buffer_size((w, h), s.scale);
         let selected = self.selected.filter(|sel| sel.surface == i).map(|sel| sel.window);
         // With a selection, only its workspace is marked; without, sway's focused one.
@@ -343,28 +397,42 @@ impl App {
             Some(_) => selected.map(|w| s.scene.windows[w].workspace),
             None => s.scene.selected_workspace(None),
         };
-        let view = View { selected, selected_workspace, thumbs: &self.thumbs };
-        let Some(pix) = self.renderer.draw(&s.scene, &view, pw, ph, scale) else { return };
+        let view = View { selected, selected_workspace };
+        let tiled = self.capture.is_some();
+        let pix = if tiled {
+            renderer.draw_workspaces(&s.scene, &view, pw, ph, scale)
+        } else {
+            renderer.draw(&s.scene, &view, pw, ph, scale)
+        };
+        let Some(pix) = pix else { return };
 
-        let (buffer, canvas) =
-            match self.pool.create_buffer(pw as i32, ph as i32, pw as i32 * 4, wl_shm::Format::Argb8888) {
-                Ok(b) => b,
-                Err(e) => return warn(format_args!("buffer: {e}")),
+        // Tiles are synchronized subsurfaces: what is committed here shows
+        // with the overlay's next commit.
+        for (k, win) in s.scene.windows.iter().enumerate().filter(|_| tiled) {
+            let Some(tile) = s.tiles.get(&win.id) else { continue };
+            let (tw, th) = tile.size();
+            let size = ((tw as f32 * scale).round() as u32, (th as f32 * scale).round() as u32);
+            let Some(pix) = renderer.draw_tile(win, selected == Some(k), tile.has_frame(), size, scale)
+            else {
+                continue;
             };
-        // tiny-skia is premultiplied RGBA; ARGB8888 little-endian is BGRA in memory.
-        for (dst, src) in canvas.as_chunks_mut::<4>().0.iter_mut().zip(pix.data().as_chunks::<4>().0) {
-            *dst = [src[2], src[1], src[0], src[3]];
+            let (surface, viewport) = tile.deco();
+            viewport.set_destination(tw, th);
+            if let Err(e) = attach(&mut self.pool, surface, &pix) {
+                return warn(e);
+            }
+            surface.commit();
         }
+
         let surface = s.layer.wl_surface();
         match &s.viewport {
             // The buffer is pw×ph; the viewport shows it at the logical size.
             Some(viewport) => viewport.set_destination(w as i32, h as i32),
             None => surface.set_buffer_scale((s.scale / SCALE_UNIT).max(1) as i32),
         }
-        surface.damage_buffer(0, 0, pw as i32, ph as i32);
         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-        if let Err(e) = buffer.attach_to(surface) {
-            return warn(format_args!("attach: {e}"));
+        if let Err(e) = attach(&mut self.pool, surface, &pix) {
+            return warn(e);
         }
         s.layer.commit();
         s.dirty = false;

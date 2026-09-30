@@ -2,8 +2,8 @@
 
 A workspace overview for sway. Every workspace is shown as a small copy of your
 screen, with windows labelled by app and title. It reads the layout live from
-sway, with no daemon. On sway 1.11 and later, windows can also show their
-contents; see `thumbnails` under Config.
+sway, with no daemon. On sway 1.12 and later, windows also show their
+contents, live.
 
 <img width="8000" height="3080" alt="image" src="https://raw.githubusercontent.com/agejevasv/swayview/main/.github/images/screenshot.png" />
 
@@ -49,8 +49,7 @@ Mistakes are reported on stderr, so run `swayview` in a terminal to see them.
 All keys, with their defaults:
 
 ```yaml
-thumbnails: false         # window contents, on sway 1.11 and later; they
-                          # appear a moment after the overview opens
+thumbnails: true          # live window contents, on sway 1.12 and later
 fonts:
   app:                    # app name line, and workspace numbers
     family: "sans-serif"  # any fontconfig family, e.g. "Inter" or "monospace"
@@ -80,3 +79,8 @@ colors:                   # quote colors, since # starts a YAML comment
       background: "#900000"
       text: "#ffffff"
 ```
+
+While the overview shows live thumbnails, windows on an output with a
+fractional scale, such as 1.5, can look blurry
+([sway#9113](https://github.com/swaywm/sway/issues/9113)). Set
+`thumbnails: false` if that bothers you.
