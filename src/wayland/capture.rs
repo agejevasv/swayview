@@ -205,6 +205,33 @@ fn pick_format(offered: &[wl_shm::Format], shown: &[wl_shm::Format]) -> Option<(
         | F::Abgr2101010
         | F::Xbgr2101010 => Some(4),
         F::Rgb888 | F::Bgr888 => Some(3),
+        F::Rgb565
+        | F::Bgr565
+        | F::Argb4444
+        | F::Xrgb4444
+        | F::Abgr4444
+        | F::Xbgr4444
+        | F::Rgba4444
+        | F::Rgbx4444
+        | F::Bgra4444
+        | F::Bgrx4444
+        | F::Argb1555
+        | F::Xrgb1555
+        | F::Abgr1555
+        | F::Xbgr1555
+        | F::Rgba5551
+        | F::Rgbx5551
+        | F::Bgra5551
+        | F::Bgrx5551 => Some(2),
+        F::Argb16161616
+        | F::Xrgb16161616
+        | F::Abgr16161616
+        | F::Xbgr16161616
+        | F::Argb16161616f
+        | F::Xrgb16161616f
+        | F::Abgr16161616f
+        | F::Xbgr16161616f => Some(8),
+        F::Rgb161616 | F::Bgr161616 | F::Bgr161616f => Some(6),
         _ => None,
     };
     let displayable = |f: &F| matches!(f, F::Argb8888 | F::Xrgb8888) || shown.contains(f);
@@ -214,7 +241,7 @@ fn pick_format(offered: &[wl_shm::Format], shown: &[wl_shm::Format]) -> Option<(
 /// Bytes per row of a `width` wide buffer: a multiple of both the pixel
 /// size and 4, as sway reads rows with OpenGL's default 4-byte alignment.
 fn stride(width: u32, bpp: u32) -> u32 {
-    let unit = if bpp.is_multiple_of(4) { bpp } else { bpp * 4 };
+    let unit = (1..=4).map(|k| k * bpp).find(|n| n.is_multiple_of(4)).unwrap_or(4 * bpp);
     (width * bpp).next_multiple_of(unit)
 }
 
@@ -407,9 +434,12 @@ mod tests {
         assert_eq!(pick_format(&[F::Bgr888], &[F::Argb8888, F::Bgr888]), Some((F::Bgr888, 3)));
         // Not shown, or an unknown size: nothing.
         assert_eq!(pick_format(&[F::Bgr888], &[F::Argb8888]), None);
-        assert_eq!(pick_format(&[F::Rgb565], &[F::Rgb565]), None);
+        assert_eq!(pick_format(&[F::Yuyv], &[F::Yuyv]), None);
+        assert_eq!(pick_format(&[F::Rgb565], &[F::Rgb565]), Some((F::Rgb565, 2)));
+        assert_eq!(pick_format(&[F::Abgr16161616f], &[F::Abgr16161616f]), Some((F::Abgr16161616f, 8)));
+        assert_eq!(pick_format(&[F::Bgr161616], &[F::Bgr161616]), Some((F::Bgr161616, 6)));
         // ARGB8888 is always shown, listed or not.
-        assert_eq!(pick_format(&[F::Rgb565, F::Argb8888], &[]), Some((F::Argb8888, 4)));
+        assert_eq!(pick_format(&[F::Bgr888, F::Argb8888], &[]), Some((F::Argb8888, 4)));
     }
 
     #[test]
@@ -420,5 +450,8 @@ mod tests {
         // 1001 × 3 = 3003 bytes, padded to the next multiple of 12.
         assert_eq!(stride(1001, 3), 3012);
         assert_eq!(stride(1, 3), 12);
+        assert_eq!(stride(1001, 2), 2004);
+        assert_eq!(stride(1001, 8), 8008);
+        assert_eq!(stride(1001, 6), 6012);
     }
 }
