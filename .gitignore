@@ -1,2 +1,4 @@
 /target
 /.claude
+/e2e-test/out
+__pycache__/

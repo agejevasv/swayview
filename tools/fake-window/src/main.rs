@@ -1,6 +1,10 @@
 //! Plain test window with a chosen `app_id` and title, for faking sway layouts.
 //!
 //!     cargo run -p fake-window -- firefox "GitHub - Mozilla Firefox"
+//!
+//! With `FAKE_WINDOW_PATTERN` set, it shows a test pattern instead of one
+//! color: red, green and blue quarters, which show swapped color channels,
+//! and diagonal stripes, which show rows read at the wrong length.
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -30,6 +34,7 @@ struct Dummy {
     pool: SlotPool,
     _window: Window,
     color: [u8; 4],
+    pattern: bool,
     exit: bool,
 }
 
@@ -58,6 +63,7 @@ fn main() {
         shm,
         _window: window,
         color: [(h & 0x7f) as u8 + 64, (h >> 8 & 0x7f) as u8 + 64, (h >> 16 & 0x7f) as u8 + 64, 255],
+        pattern: std::env::var_os("FAKE_WINDOW_PATTERN").is_some(),
         exit: false,
     };
     while !dummy.exit {
@@ -78,13 +84,32 @@ impl WindowHandler for Dummy {
         configure: WindowConfigure,
         _: u32,
     ) {
-        let w = configure.new_size.0.map_or(400, std::num::NonZero::get) as i32;
-        let h = configure.new_size.1.map_or(300, std::num::NonZero::get) as i32;
+        // Odd, so the rows of a capture in a 2-, 3- or 6-byte format need padding.
+        let w = configure.new_size.0.map_or(401, std::num::NonZero::get) as i32;
+        let h = configure.new_size.1.map_or(301, std::num::NonZero::get) as i32;
         let (buffer, canvas) = self.pool.create_buffer(w, h, w * 4, wl_shm::Format::Argb8888).unwrap();
-        canvas.as_chunks_mut::<4>().0.fill(self.color);
+        let pixels = canvas.as_chunks_mut::<4>().0;
+        if self.pattern {
+            for (i, px) in pixels.iter_mut().enumerate() {
+                *px = pattern(i as i32 % w, i as i32 / w, w, h);
+            }
+        } else {
+            pixels.fill(self.color);
+        }
         window.wl_surface().damage_buffer(0, 0, w, h);
         buffer.attach_to(window.wl_surface()).unwrap();
         window.commit();
+    }
+}
+
+/// The test pattern's pixel at `x`, `y`, as ARGB8888 bytes: B, G, R, A.
+fn pattern(x: i32, y: i32, w: i32, h: i32) -> [u8; 4] {
+    match (x < w / 2, y < h / 2) {
+        (true, true) => [0, 0, 255, 255],
+        (false, true) => [0, 255, 0, 255],
+        (true, false) => [255, 0, 0, 255],
+        (false, false) if (x + y) / 8 % 2 == 0 => [255, 255, 255, 255],
+        (false, false) => [0, 0, 0, 255],
     }
 }
 

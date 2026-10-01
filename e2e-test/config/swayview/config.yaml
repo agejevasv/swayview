@@ -1,0 +1,3 @@
+# Opaque, so the screenshots show only the overview, not the windows behind it.
+colors:
+  backdrop: "#101216"
