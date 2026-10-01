@@ -48,11 +48,6 @@ const LIVE_FPS: u64 = 15;
 /// Failed frames in a row after which a window is not asked again.
 const MAX_FAILURES: u32 = 3;
 
-/// Formats whose pixels sway can show again as they are, in order of
-/// preference: with alpha first, so translucent windows stay translucent.
-const FORMATS: [wl_shm::Format; 4] =
-    [wl_shm::Format::Argb8888, wl_shm::Format::Abgr8888, wl_shm::Format::Xrgb8888, wl_shm::Format::Xbgr8888];
-
 pub(super) struct Capture {
     toplevels: ForeignToplevelList,
     sources: ExtForeignToplevelImageCaptureSourceManagerV1,
@@ -168,13 +163,12 @@ impl Stream {
 
     fn make_slots(&mut self, id: &str, shm: &Shm, qh: &QueueHandle<App>) -> Result<()> {
         let (w, h) = self.size;
-        let len = w as usize * h as usize * 4;
+        let (format, bpp) = pick_format(&self.formats, shm.formats())
+            .with_context(|| format!("no supported pixel format in {:?}", self.formats))?;
+        let stride = stride(w, bpp);
+        let len = stride as usize * h as usize;
         // Sizes and offsets in wl_shm are `i32`.
         ensure!(len > 0 && i32::try_from(2 * len).is_ok(), "unusable window size {w}×{h}");
-        let format = FORMATS
-            .into_iter()
-            .find(|f| self.formats.contains(f))
-            .with_context(|| format!("no supported pixel format in {:?}", self.formats))?;
         let mut pool = RawPool::new(2 * len, shm)?;
         // The buffers keep the pool's memory. A replaced buffer may still be
         // shown; destroying it leaves sway's copy.
@@ -182,13 +176,46 @@ impl Stream {
             .map(|i| {
                 let offset = (i * len) as i32;
                 let data = SlotId(id.to_owned(), i);
-                let buffer = pool.create_buffer(offset, w as i32, h as i32, w as i32 * 4, format, data, qh);
+                let buffer = pool.create_buffer(offset, w as i32, h as i32, stride as i32, format, data, qh);
                 Slot { buffer, size: (w, h), busy: false }
             })
             .collect();
         self.latest = None;
         Ok(())
     }
+}
+
+/// The first `offered` capture format that sway can also show, as a buffer
+/// of that format, and its bytes per pixel. Sway offers just one: whichever
+/// its GPU driver reads fastest. ARGB8888 and XRGB8888 are always shown;
+/// others only when `wl_shm` lists them as `shown`.
+fn pick_format(offered: &[wl_shm::Format], shown: &[wl_shm::Format]) -> Option<(wl_shm::Format, u32)> {
+    use wl_shm::Format as F;
+    let bytes = |f: F| match f {
+        F::Argb8888
+        | F::Xrgb8888
+        | F::Abgr8888
+        | F::Xbgr8888
+        | F::Rgba8888
+        | F::Rgbx8888
+        | F::Bgra8888
+        | F::Bgrx8888
+        | F::Argb2101010
+        | F::Xrgb2101010
+        | F::Abgr2101010
+        | F::Xbgr2101010 => Some(4),
+        F::Rgb888 | F::Bgr888 => Some(3),
+        _ => None,
+    };
+    let displayable = |f: &F| matches!(f, F::Argb8888 | F::Xrgb8888) || shown.contains(f);
+    offered.iter().copied().filter(displayable).find_map(|f| Some((f, bytes(f)?)))
+}
+
+/// Bytes per row of a `width` wide buffer: a multiple of both the pixel
+/// size and 4, as sway reads rows with OpenGL's default 4-byte alignment.
+fn stride(width: u32, bpp: u32) -> u32 {
+    let unit = if bpp.is_multiple_of(4) { bpp } else { bpp * 4 };
+    (width * bpp).next_multiple_of(unit)
 }
 
 impl Drop for Slot {
@@ -365,5 +392,33 @@ impl Dispatch2<WlBuffer, App> for SlotId {
         {
             slot.busy = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wl_shm::Format as F;
+
+    #[test]
+    fn picks_the_first_format_sway_can_show() {
+        assert_eq!(pick_format(&[F::Xbgr8888], &[F::Xbgr8888]), Some((F::Xbgr8888, 4)));
+        // A 4K desktop's driver may read three bytes a pixel.
+        assert_eq!(pick_format(&[F::Bgr888], &[F::Argb8888, F::Bgr888]), Some((F::Bgr888, 3)));
+        // Not shown, or an unknown size: nothing.
+        assert_eq!(pick_format(&[F::Bgr888], &[F::Argb8888]), None);
+        assert_eq!(pick_format(&[F::Rgb565], &[F::Rgb565]), None);
+        // ARGB8888 is always shown, listed or not.
+        assert_eq!(pick_format(&[F::Rgb565, F::Argb8888], &[]), Some((F::Argb8888, 4)));
+    }
+
+    #[test]
+    fn rows_are_whole_pixels_and_four_byte_aligned() {
+        assert_eq!(stride(1920, 4), 7680);
+        assert_eq!(stride(1921, 4), 7684);
+        assert_eq!(stride(1920, 3), 5760);
+        // 1001 × 3 = 3003 bytes, padded to the next multiple of 12.
+        assert_eq!(stride(1001, 3), 3012);
+        assert_eq!(stride(1, 3), 12);
     }
 }
