@@ -11,21 +11,30 @@ show their contents, live.
 
 Needs sway 1.4 or later.
 
-Download a release binary (x86_64, glibc 2.35+) from the
-[releases page](https://github.com/agejevasv/swayview/releases):
+On Arch Linux: `yay -S swayview` (or `swayview-bin` for the prebuilt binary).
+
+### Other distributions
+
+Install the latest release binary (x86_64, glibc 2.35+) to `/usr/local/bin`:
 
 ```sh
-tar xzf swayview-v*-x86_64-linux.tar.gz
-sudo install -m755 swayview-v*-x86_64-linux/swayview /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/agejevasv/swayview/main/install.sh | sh
 ```
 
-Or build from source (Rust 1.89+, `libxkbcommon-dev`):
+To install to `~/.local/bin` instead, without sudo, end the command with
+`| PREFIX=~/.local sh`. Binaries are also on the
+[releases page](https://github.com/agejevasv/swayview/releases).
+
+Or build from source (Rust 1.89+ and libxkbcommon, e.g. `libxkbcommon-dev` on
+Debian/Ubuntu):
 
 ```sh
 make && sudo make install    # PREFIX and DESTDIR work as usual
 ```
 
-Then bind it in your sway config. Pressing the key again closes it.
+## Setup
+
+Bind it in your sway config. Pressing the key again closes it.
 
 ```
 bindsym $mod+Tab exec pkill -x swayview || swayview
