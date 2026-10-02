@@ -22,8 +22,8 @@ pub(super) struct Tile {
     thumb: Part,
     deco: Part,
     place: Place,
-    /// Size of the frame shown by `thumb`, once there is one.
-    shown: Option<(u32, u32)>,
+    /// Whether `thumb` shows a frame yet.
+    shown: bool,
     /// What `deco` was last drawn for, to skip drawing it the same again.
     drawn: Option<Deco>,
     /// Moved since the overlay's last commit. Until that commit, which moves
@@ -88,23 +88,25 @@ impl Tile {
         // Frames arrive on their own time, not with the overlay's commits.
         thumb.subsurface.set_desync();
         let deco = Part::new(g, parent);
-        Tile { thumb, deco, place, shown: None, drawn: None, moved: false }
+        Tile { thumb, deco, place, shown: false, drawn: None, moved: false }
     }
 
     fn show(&mut self, buffer: &WlBuffer, size: (u32, u32)) {
         let t = &self.thumb;
         t.surface.attach(Some(buffer), 0, 0);
         t.surface.damage_buffer(0, 0, size.0 as i32, size.1 as i32);
-        self.shown = Some(size);
+        self.shown = true;
         self.fit();
     }
 
-    /// Scales the frame to cover the tile, cutting off what sticks out.
+    /// Stretches the frame over the tile, whatever their shapes. They differ
+    /// a little as the tile includes the title bar and borders, and more for
+    /// tabbed, stacked and fullscreen windows, whose tile is not their shape.
     fn fit(&self) {
-        let Some(size) = self.shown else { return };
-        let (x, y, w, h) = cover(size, (self.place.w, self.place.h));
+        if !self.shown {
+            return;
+        }
         let t = &self.thumb;
-        t.viewport.set_source(x, y, w, h);
         t.viewport.set_destination(self.place.w, self.place.h);
         t.surface.commit();
     }
@@ -128,7 +130,7 @@ impl Tile {
     ) -> Result<()> {
         let Place { w, h, .. } = self.place;
         let (f, size) = buffer_size((w as u32, h as u32), scale);
-        let behind = if self.shown.is_some() { Behind::Thumbnail } else { Behind::Nothing };
+        let behind = if self.shown { Behind::Thumbnail } else { Behind::Nothing };
         let deco = Deco { selected, behind, size };
         if self.drawn == Some(deco) {
             return Ok(());
@@ -154,17 +156,6 @@ fn snap(r: Rect) -> Place {
     let (x0, y0) = (r.x.round(), r.y.round());
     let (x1, y1) = ((r.x + r.w).round(), (r.y + r.h).round());
     Place { x: x0 as i32, y: y0 as i32, w: (x1 - x0) as i32, h: (y1 - y0) as i32 }
-}
-
-/// The middle of a `bw`×`bh` buffer with the shape of a `w`×`h` box, as x, y,
-/// width and height, in the 1/256 steps a viewport takes, rounded to stay
-/// inside the buffer.
-fn cover((bw, bh): (u32, u32), (w, h): (i32, i32)) -> (f64, f64, f64, f64) {
-    let (bw, bh, w, h) = (f64::from(bw), f64::from(bh), f64::from(w), f64::from(h));
-    let s = (w / bw).max(h / bh);
-    let q = |v: f64| (v * 256.0).floor() / 256.0;
-    let (sw, sh) = (q((w / s).min(bw)).max(1.0 / 256.0), q((h / s).min(bh)).max(1.0 / 256.0));
-    (q((bw - sw) / 2.0), q((bh - sh) / 2.0), sw, sh)
 }
 
 impl App {
@@ -195,7 +186,7 @@ impl App {
                 part.subsurface.place_above(&below);
                 below = part.surface.clone();
             }
-            if tile.shown.is_none()
+            if !tile.shown
                 && let Some((buffer, size)) = win.toplevel.as_deref().and_then(|id| capture.take_latest(id))
             {
                 tile.place = place;
@@ -218,7 +209,7 @@ impl App {
             return;
         };
         let Some((buffer, size)) = capture.take_latest(id) else { return };
-        let first = tile.shown.is_none();
+        let first = !tile.shown;
         tile.show(&buffer, size);
         // Its deco was drawn as a plain box until now.
         if first {
@@ -235,21 +226,5 @@ mod tests {
     fn snapping_to_logical_pixels() {
         assert_eq!(snap(Rect::new(10.3, 20.7, 101.1, 60.3)), Place { x: 10, y: 21, w: 101, h: 60 });
         assert_eq!(snap(Rect::new(5.0, 5.0, 0.2, 0.2)).w, 0);
-    }
-
-    #[test]
-    fn frame_covers_the_tile() {
-        // Same shape: all of it.
-        assert_eq!(cover((1920, 1080), (192, 108)), (0.0, 0.0, 1920.0, 1080.0));
-        // A narrow tile: the middle columns.
-        assert_eq!(cover((1920, 1080), (100, 200)), (690.0, 0.0, 540.0, 1080.0));
-        // A wide tile: the middle rows.
-        assert_eq!(cover((1000, 1000), (200, 100)), (0.0, 250.0, 1000.0, 500.0));
-        // Never past the buffer's edge.
-        for (buf, tile) in [((1531, 977), (333, 211)), ((7, 3), (1, 999)), ((1, 1), (5, 3))] {
-            let (x, y, w, h) = cover(buf, tile);
-            assert!(x >= 0.0 && y >= 0.0 && w > 0.0 && h > 0.0);
-            assert!(x + w <= f64::from(buf.0) && y + h <= f64::from(buf.1), "{buf:?} {tile:?}");
-        }
     }
 }

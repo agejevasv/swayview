@@ -67,6 +67,27 @@ impl Rect {
             })
             .collect()
     }
+
+    /// Splits into a grid of `n` equal cells, with about as many rows as
+    /// columns, so the cells come close to `self`'s shape. When the counts
+    /// differ, there are more cells along `axis`. A short last row is centered.
+    fn grid(&self, n: usize, axis: Axis) -> Vec<Rect> {
+        let long = (1..=n).find(|k| k * k >= n).unwrap_or(1);
+        let short = n.div_ceil(long);
+        let (cols, rows) = match axis {
+            Axis::Horizontal => (long, short),
+            Axis::Vertical => (short, long),
+        };
+        let (w, h) = (self.w / cols as f32, self.h / rows as f32);
+        (0..n)
+            .map(|i| {
+                let (row, col) = (i / cols, i % cols);
+                let in_row = cols.min(n - row * cols);
+                let x = self.x + (self.w - in_row as f32 * w) / 2.0 + col as f32 * w;
+                Rect::new(x, self.y + row as f32 * h, w, h)
+            })
+            .collect()
+    }
 }
 
 /// A sway container id, as used in `[con_id=…]` criteria.
@@ -262,9 +283,10 @@ fn workspace(node: &Node, output_rect: Rect) -> Workspace {
 enum Arrange {
     /// At their own rects, scaled into the container's target.
     Mapped,
-    /// As equal slices: tabbed and stacked children all share one rect in
-    /// sway, and missing rects fall back to this too.
+    /// As equal slices, when rects are missing.
     Slices(Axis),
+    /// In a grid: tabbed and stacked children all share one rect in sway.
+    Grid(Axis),
     /// By their share of the container. A fullscreen child reports the whole
     /// output as its rect; this puts it back in its place in the layout.
     Shares(Axis),
@@ -309,8 +331,8 @@ impl Collector {
         let axis = if node.layout == Layout::Splitv { Axis::Vertical } else { Axis::Horizontal };
         let missing = own.is_empty() || node.nodes.iter().any(|c| c.outer_rect().is_empty());
         let arrange = match node.layout {
-            Layout::Tabbed => Arrange::Slices(Axis::Horizontal),
-            Layout::Stacked => Arrange::Slices(Axis::Vertical),
+            Layout::Tabbed => Arrange::Grid(Axis::Horizontal),
+            Layout::Stacked => Arrange::Grid(Axis::Vertical),
             _ if node.nodes.iter().any(|c| c.fullscreen_mode != 0) => Arrange::Shares(axis),
             _ if missing => Arrange::Slices(axis),
             _ => Arrange::Mapped,
@@ -318,6 +340,7 @@ impl Collector {
         let n = node.nodes.len();
         let slots = match arrange {
             Arrange::Slices(axis) => target.split(&equal_shares(n), axis),
+            Arrange::Grid(axis) => target.grid(n, axis),
             Arrange::Shares(axis) => target.split(&shares(&node.nodes), axis),
             Arrange::Mapped => node.nodes.iter().map(|c| own.map_into(c.outer_rect(), target)).collect(),
         };
@@ -500,17 +523,109 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn tabbed_children_become_slices() {
+    fn tabbed_children_go_in_a_grid() {
         let t = tree();
         let rects: Vec<_> = ws(&t, "2").windows.iter().map(|w| w.rect).collect();
         assert_eq!(
             rects,
             [
-                Rect::new(0.0, 0.0, 640.0, 1080.0),
-                Rect::new(640.0, 0.0, 640.0, 1080.0),
-                Rect::new(1280.0, 0.0, 640.0, 1080.0),
+                Rect::new(0.0, 0.0, 960.0, 540.0),
+                Rect::new(960.0, 0.0, 960.0, 540.0),
+                Rect::new(480.0, 540.0, 960.0, 540.0),
             ]
         );
+    }
+
+    #[test]
+    fn grid_cells_come_close_to_the_shape() {
+        let r = Rect::new(0.0, 0.0, 600.0, 400.0);
+        let sizes = |n, axis| r.grid(n, axis).iter().map(|c| (c.w, c.h)).collect::<Vec<_>>();
+        assert_eq!(sizes(1, Axis::Horizontal), [(600.0, 400.0)]);
+        // Two: side by side for tabbed, on top of each other for stacked.
+        assert_eq!(sizes(2, Axis::Horizontal), [(300.0, 400.0); 2]);
+        assert_eq!(sizes(2, Axis::Vertical), [(600.0, 200.0); 2]);
+        assert_eq!(sizes(4, Axis::Vertical), [(300.0, 200.0); 4]);
+        // Five stacked: three rows of two, the last one centered.
+        let cells = r.grid(5, Axis::Vertical);
+        assert_eq!(cells[4], Rect::new(150.0, 800.0 / 3.0, 300.0, 400.0 / 3.0));
+    }
+
+    #[test]
+    fn grid_cells_tile_the_container_in_reading_order() {
+        let r = Rect::new(10.0, 20.0, 600.0, 400.0);
+        let level = |a: &Rect, b: &Rect| (a.y - b.y).abs() < 0.01;
+        for axis in [Axis::Horizontal, Axis::Vertical] {
+            for n in 1..=12 {
+                let cells = r.grid(n, axis);
+                assert_eq!(cells.len(), n);
+                for (i, a) in cells.iter().enumerate() {
+                    assert!(a.x >= r.x && a.y >= r.y, "{n} {axis:?} {a:?}");
+                    assert!(
+                        a.x + a.w <= r.x + r.w + 0.01 && a.y + a.h <= r.y + r.h + 0.01,
+                        "{n} {axis:?} {a:?}"
+                    );
+                    for b in &cells[i + 1..] {
+                        // Later cells come after: further right on the same row, or lower.
+                        let after = b.y >= a.y + a.h - 0.01 || (level(a, b) && b.x >= a.x + a.w - 0.01);
+                        assert!(after, "{n} {axis:?} {a:?} then {b:?}");
+                    }
+                }
+                // The last row is centered.
+                let last = cells[n - 1];
+                let first = cells.iter().find(|c| level(c, &last)).unwrap();
+                let (left, right) = (first.x - r.x, r.x + r.w - (last.x + last.w));
+                assert!((left - right).abs() < 0.01, "{n} {axis:?}");
+            }
+        }
+        // More columns for tabbed, more rows for stacked.
+        let cols = |n, axis| r.grid(n, axis).iter().filter(|c| level(c, &r)).count();
+        assert_eq!(cols(6, Axis::Horizontal), 3);
+        assert_eq!(cols(6, Axis::Vertical), 2);
+    }
+
+    #[test]
+    fn stacked_and_tabbed_children_and_their_splits() {
+        // L beside a container of A, a split of B and C, and `more`; off the origin.
+        let json = |layout, more| {
+            format!(
+                r#"{{"id":1,"type":"root","rect":{{"x":0,"y":0,"width":400,"height":300}},
+                "nodes":[{{"id":2,"name":"X","type":"output","rect":{{"x":0,"y":100,"width":400,"height":200}},"nodes":[
+                  {{"id":3,"name":"1","type":"workspace","layout":"splith","rect":{{"x":0,"y":100,"width":400,"height":200}},"nodes":[
+                    {{"id":10,"name":"L","type":"con","rect":{{"x":0,"y":100,"width":200,"height":200}}}},
+                    {{"id":11,"type":"con","layout":"{layout}","rect":{{"x":200,"y":100,"width":200,"height":200}},"nodes":[
+                      {{"id":12,"name":"A","type":"con","rect":{{"x":200,"y":140,"width":200,"height":160}}}},
+                      {{"id":13,"type":"con","layout":"splith","rect":{{"x":200,"y":140,"width":200,"height":160}},"nodes":[
+                        {{"id":14,"name":"B","type":"con","rect":{{"x":200,"y":140,"width":150,"height":160}}}},
+                        {{"id":15,"name":"C","type":"con","rect":{{"x":350,"y":140,"width":50,"height":160}}}}]}}{more}]}}]}}]}}]}}"#
+            )
+        };
+        let rects = |layout, more| {
+            let t = Tree::from_json(json(layout, more).as_bytes()).unwrap();
+            ws(&t, "1").windows.iter().map(|w| (w.title.clone(), w.rect)).collect::<Vec<_>>()
+        };
+        let named = |v: &[(&str, Rect)]| v.iter().map(|(t, r)| (t.to_string(), *r)).collect::<Vec<_>>();
+        let l = ("L", Rect::new(0.0, 100.0, 200.0, 200.0));
+        assert_eq!(
+            rects("stacked", ""),
+            named(&[
+                l,
+                ("A", Rect::new(200.0, 100.0, 200.0, 100.0)),
+                ("B", Rect::new(200.0, 200.0, 150.0, 100.0)),
+                ("C", Rect::new(350.0, 200.0, 50.0, 100.0)),
+            ])
+        );
+        assert_eq!(
+            rects("tabbed", ""),
+            named(&[
+                l,
+                ("A", Rect::new(200.0, 100.0, 100.0, 200.0)),
+                ("B", Rect::new(300.0, 100.0, 75.0, 200.0)),
+                ("C", Rect::new(375.0, 100.0, 25.0, 200.0)),
+            ])
+        );
+        // A third one: a grid, not slices, the last one centered below.
+        let d = r#",{"id":16,"name":"D","type":"con","rect":{"x":200,"y":140,"width":200,"height":160}}"#;
+        assert_eq!(rects("stacked", d)[4], ("D".to_string(), Rect::new(250.0, 200.0, 100.0, 100.0)));
     }
 
     #[test]

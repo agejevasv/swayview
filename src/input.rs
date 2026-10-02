@@ -245,8 +245,9 @@ mod tests {
         let (a, b) = two_scenes();
         let scenes = [&a, &b];
         // Rightmost window on the left output: nothing further right there.
-        let discord = Sel { surface: 0, window: index(&a, "Discord | #rust") };
-        let Action::Select(next) = key(&scenes, Some(discord), Key::Arrow(Dir::Right)) else {
+        let slack = Sel { surface: 0, window: index(&a, "Slack | #general | Acme") };
+        assert_eq!(a.neighbor(slack.window, Dir::Right), None);
+        let Action::Select(next) = key(&scenes, Some(slack), Key::Arrow(Dir::Right)) else {
             panic!("expected a selection");
         };
         assert_eq!(next.surface, 1);
