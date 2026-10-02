@@ -25,7 +25,7 @@ To install to `~/.local/bin` instead, without sudo, end the command with
 `| PREFIX=~/.local sh`. Binaries are also on the
 [releases page](https://github.com/agejevasv/swayview/releases).
 
-Or build from source (Rust 1.89+ and libxkbcommon, e.g. `libxkbcommon-dev` on
+Or build from source (Rust 1.89+ and `libxkbcommon`, e.g. `libxkbcommon-dev` on
 Debian/Ubuntu):
 
 ```sh
@@ -88,8 +88,3 @@ colors:                   # quote colors, since # starts a YAML comment
       background: "#900000"
       text: "#ffffff"
 ```
-
-While the overview shows live thumbnails, windows on an output with a
-fractional scale, such as 1.5, can look blurry
-([sway#9113](https://github.com/swaywm/sway/issues/9113)). Set
-`thumbnails: false` if that bothers you.
