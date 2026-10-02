@@ -25,6 +25,8 @@ pub struct WinItem {
     pub app: String,
     pub title: String,
     pub rect: Rect,
+    /// See `Window::crop`.
+    pub crop: (f32, f32),
     /// Index into `Scene::workspaces`.
     pub workspace: usize,
     pub focused: bool,
@@ -129,6 +131,7 @@ pub fn build(output: &Output, w: f32, h: f32) -> Scene {
                 app: win.app.clone(),
                 title: win.title.clone(),
                 rect: r,
+                crop: win.crop,
                 focused: win.focused,
                 urgent: win.urgent,
                 workspace: i,

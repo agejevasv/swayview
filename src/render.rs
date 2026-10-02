@@ -346,6 +346,7 @@ mod tests {
             app,
             title,
             rect: Rect::default(),
+            crop: (1.0, 1.0),
             workspace: 0,
             focused: false,
             urgent: false,

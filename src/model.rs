@@ -132,6 +132,10 @@ pub struct Window {
     pub app: String,
     pub title: String,
     pub rect: Rect,
+    /// The part of the window `rect` shows, from its top-left, as fractions
+    /// of its width and height: less than all of it in a tabbed or stacked
+    /// container, where `rect` is a cell of the container.
+    pub crop: (f32, f32),
     pub floating: bool,
     /// The fullscreen container the window is in, or is.
     pub fullscreen: Option<Fullscreen>,
@@ -255,7 +259,7 @@ impl Tree {
 }
 
 fn workspace(node: &Node, output_rect: Rect) -> Workspace {
-    let mut c = Collector { floating: false, fullscreen: None, windows: Vec::new() };
+    let mut c = Collector { floating: false, fullscreen: None, crop: (1.0, 1.0), windows: Vec::new() };
     c.children(node, node.rect.into());
     c.floating = true;
     for child in &node.floating_nodes {
@@ -297,6 +301,8 @@ struct Collector {
     floating: bool,
     /// The fullscreen container being collected, if any.
     fullscreen: Option<Fullscreen>,
+    /// See `Window::crop`.
+    crop: (f32, f32),
     windows: Vec<Window>,
 }
 
@@ -311,6 +317,7 @@ impl Collector {
                 app: node.app_name(),
                 title: node.name_str().to_string(),
                 rect: target,
+                crop: self.crop,
                 floating: self.floating,
                 fullscreen,
                 sticky: node.sticky,
@@ -344,9 +351,17 @@ impl Collector {
             Arrange::Shares(axis) => target.split(&shares(&node.nodes), axis),
             Arrange::Mapped => node.nodes.iter().map(|c| own.map_into(c.outer_rect(), target)).collect(),
         };
+        let crop = self.crop;
         for (child, slot) in node.nodes.iter().zip(slots) {
+            // A child of a tabbed or stacked container is as large as the
+            // container, and its cell shows the part of it from the top-left.
+            if matches!(arrange, Arrange::Grid(_)) {
+                let part = |cell: f32, whole: f32| if whole > 0.0 { (cell / whole).min(1.0) } else { 1.0 };
+                self.crop = (crop.0 * part(slot.w, target.w), crop.1 * part(slot.h, target.h));
+            }
             self.node(child, slot);
         }
+        self.crop = crop;
     }
 }
 
@@ -534,6 +549,9 @@ pub(crate) mod tests {
                 Rect::new(480.0, 540.0, 960.0, 540.0),
             ]
         );
+        // Each shows the top-left quarter of its window; elsewhere, all of it.
+        assert!(ws(&t, "2").windows.iter().all(|w| w.crop == (0.5, 0.5)));
+        assert!(ws(&t, "1").windows.iter().all(|w| w.crop == (1.0, 1.0)));
     }
 
     #[test]
@@ -626,6 +644,15 @@ pub(crate) mod tests {
         // A third one: a grid, not slices, the last one centered below.
         let d = r#",{"id":16,"name":"D","type":"con","rect":{"x":200,"y":140,"width":200,"height":160}}"#;
         assert_eq!(rects("stacked", d)[4], ("D".to_string(), Rect::new(250.0, 200.0, 100.0, 100.0)));
+
+        // The part each shows, splits included, as their cell is half the container.
+        let crops = |layout, more| {
+            let t = Tree::from_json(json(layout, more).as_bytes()).unwrap();
+            ws(&t, "1").windows.iter().map(|w| w.crop).collect::<Vec<_>>()
+        };
+        assert_eq!(crops("stacked", ""), [(1.0, 1.0), (1.0, 0.5), (1.0, 0.5), (1.0, 0.5)]);
+        assert_eq!(crops("tabbed", ""), [(1.0, 1.0), (0.5, 1.0), (0.5, 1.0), (0.5, 1.0)]);
+        assert_eq!(crops("stacked", d)[4], (0.5, 0.5));
     }
 
     #[test]
